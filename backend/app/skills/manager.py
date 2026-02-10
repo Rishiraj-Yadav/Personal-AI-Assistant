@@ -13,7 +13,8 @@ from app.skills.schema import SkillManifest, PermissionScope
 class SkillManager:
     """Manages skill loading, validation, and registry"""
     
-    def __init__(self, skills_directory: str = "skills"):
+    # def __init__(self, skills_directory: str = "skills"):
+    def __init__(self, skills_directory: str = "/app/skills"):
         """
         Initialize skill manager
         

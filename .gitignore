@@ -1,1 +1,56 @@
+# Agent Workspace - Git Ignore
+# Customize this based on your needs
+
+# Secrets and credentials
 .env
+.env.*
+*.key
+*.pem
+credentials.json
+credentials.yaml
+secrets.*
+api-keys.*
+passwords.*
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+*.cache
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+env/
+
+# Node
+node_modules/
+npm-debug.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Build outputs
+dist/
+build/
+*.exe
+*.dll
+*.so
+
+# Large files (adjust size as needed)
+# *.csv
+# *.zip
+# *.tar.gz
+
+# Keep this README
+!README.md
