@@ -1,0 +1,54 @@
+{
+  "name": "screenshot_taker",
+  "version": "0.1.0",
+  "author": "openclaw@example.com",
+  "description": "Captures a screenshot of a web page and returns base64 encoded image",
+  "permissions": [
+    "network.external",
+    "browser.automate",
+    "screenshot"
+  ],
+  "parameters": [
+    {
+      "name": "url",
+      "type": "string",
+      "description": "The URL of the web page to screenshot",
+      "required": true
+    },
+    {
+      "name": "full_page",
+      "type": "boolean",
+      "description": "Capture full page or just viewport",
+      "required": false,
+      "default": false
+    },
+    {
+      "name": "width",
+      "type": "number",
+      "description": "Viewport width in pixels",
+      "required": false,
+      "default": 1280
+    },
+    {
+      "name": "height",
+      "type": "number",
+      "description": "Viewport height in pixels",
+      "required": false,
+      "default": 720
+    }
+  ],
+  "execution": {
+    "type": "playwright_script",
+    "entry_point": "screenshot.py",
+    "timeout": 30,
+    "memory_limit": "512M",
+    "cpu_limit": 1.0,
+    "environment": {}
+  },
+  "tags": ["screenshot", "browser", "automation"],
+  "examples": [
+    "Take a screenshot of https://example.com",
+    "Capture full page screenshot of a news site"
+  ],
+  "verified": true
+}

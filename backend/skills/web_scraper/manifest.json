@@ -1,0 +1,39 @@
+{
+  "name": "web_scraper",
+  "version": "0.1.0",
+  "author": "openclaw@example.com",
+  "description": "Scrapes text content, title, and meta information from any web page URL",
+  "permissions": [
+    "network.external",
+    "browser.automate"
+  ],
+  "parameters": [
+    {
+      "name": "url",
+      "type": "string",
+      "description": "The URL of the web page to scrape",
+      "required": true
+    },
+    {
+      "name": "selector",
+      "type": "string",
+      "description": "Optional CSS selector to extract specific content",
+      "required": false,
+      "default": null
+    }
+  ],
+  "execution": {
+    "type": "playwright_script",
+    "entry_point": "scraper.py",
+    "timeout": 30,
+    "memory_limit": "512M",
+    "cpu_limit": 1.0,
+    "environment": {}
+  },
+  "tags": ["web", "scraping", "automation"],
+  "examples": [
+    "Scrape the main content from https://example.com",
+    "Get the title and description from a news article"
+  ],
+  "verified": true
+}

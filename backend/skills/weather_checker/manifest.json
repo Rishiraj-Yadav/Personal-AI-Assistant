@@ -1,0 +1,38 @@
+{
+  "name": "weather_checker",
+  "version": "0.1.0",
+  "author": "openclaw@example.com",
+  "description": "Checks current weather for a given city using wttr.in",
+  "permissions": [
+    "network.external"
+  ],
+  "parameters": [
+    {
+      "name": "city",
+      "type": "string",
+      "description": "City name to check weather for",
+      "required": true
+    },
+    {
+      "name": "format",
+      "type": "string",
+      "description": "Output format: 'simple' or 'detailed'",
+      "required": false,
+      "default": "simple"
+    }
+  ],
+  "execution": {
+    "type": "python_script",
+    "entry_point": "weather.py",
+    "timeout": 10,
+    "memory_limit": "256M",
+    "cpu_limit": 0.5,
+    "environment": {}
+  },
+  "tags": ["weather", "api", "utility"],
+  "examples": [
+    "Check weather in New York",
+    "Get current weather for London"
+  ],
+  "verified": true
+}

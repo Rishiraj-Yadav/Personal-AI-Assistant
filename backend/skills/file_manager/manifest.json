@@ -1,0 +1,67 @@
+{
+  "name": "file_manager",
+  "version": "0.1.0",
+  "author": "openclaw@example.com",
+  "description": "Manages files in a sandboxed workspace: create, read, edit, list, move, and delete files safely",
+  "permissions": [
+    "file.read",
+    "file.write"
+  ],
+  "parameters": [
+    {
+      "name": "action",
+      "type": "string",
+      "description": "Action to perform: create, read, edit, list, move, delete, search",
+      "required": true
+    },
+    {
+      "name": "path",
+      "type": "string",
+      "description": "File or directory path (relative to workspace)",
+      "required": false
+    },
+    {
+      "name": "content",
+      "type": "string",
+      "description": "File content for create/edit actions",
+      "required": false
+    },
+    {
+      "name": "new_path",
+      "type": "string",
+      "description": "New path for move/rename action",
+      "required": false
+    },
+    {
+      "name": "search_term",
+      "type": "string",
+      "description": "Term to search for in files",
+      "required": false
+    },
+    {
+      "name": "pattern",
+      "type": "string",
+      "description": "File pattern for list/search (e.g., *.py, *.txt)",
+      "required": false
+    }
+  ],
+  "execution": {
+    "type": "python_script",
+    "entry_point": "file_ops.py",
+    "timeout": 15,
+    "memory_limit": "256M",
+    "cpu_limit": 0.5,
+    "environment": {
+      "WORKSPACE_ROOT": "/workspace"
+    }
+  },
+  "tags": ["files", "workspace", "filesystem"],
+  "examples": [
+    "Create a Python file called hello.py with a hello world function",
+    "Read the contents of config.json",
+    "List all Python files in the workspace",
+    "Search for TODO comments in all files",
+    "Move data.csv to archive/data_old.csv"
+  ],
+  "verified": true
+}

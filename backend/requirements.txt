@@ -1,0 +1,78 @@
+# Core Framework
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+python-dotenv==1.0.0
+
+# LLM Integration
+groq==0.4.1
+openai==1.10.0  # For compatibility with Groq SDK
+
+# Data Models & Validation
+pydantic==2.5.3
+pydantic-settings==2.1.0
+
+# CORS & HTTP
+python-multipart==0.0.6
+httpx==0.26.0
+
+# State Management
+cachetools==5.3.2
+
+# Logging & Monitoring
+loguru==0.7.2
+
+# Security
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+
+# Date/Time
+python-dateutil==2.8.2
+
+# Browser Automation
+playwright==1.41.0
+
+# Optional: for future database integration
+# psycopg2-binary==2.9.9
+# sqlalchemy==2.0.25
+
+
+
+
+
+
+
+
+
+# # Core Framework
+# fastapi==0.109.0
+# uvicorn[standard]==0.27.0
+# python-dotenv==1.0.0
+
+# # LLM Integration
+# groq==0.4.1
+# openai==1.10.0  # For compatibility with Groq SDK
+
+# # Data Models & Validation
+# pydantic==2.5.3
+# pydantic-settings==2.1.0
+
+# # CORS & HTTP
+# python-multipart==0.0.6
+# httpx==0.26.0
+
+# # State Management
+# cachetools==5.3.2
+
+# # Logging & Monitoring
+# loguru==0.7.2
+
+# # Security
+# python-jose[cryptography]==3.3.0
+# passlib[bcrypt]==1.7.4
+
+# # Date/Time
+# python-dateutil==2.8.2
+
+# # Optional: for future database integration
+# # psycopg2-binary==2.9.9
+# # sqlalchemy==2.0.25
