@@ -1,0 +1,35 @@
+{
+  "name": "desktop_mouse",
+  "version": "1.0.0",
+  "author": "openclaw@example.com",
+  "description": "Controls the mouse on the desktop",
+  "permissions": ["desktop.mouse"],
+  "parameters": [
+    {
+      "name": "action",
+      "type": "string",
+      "description": "Action: move, click, right_click, scroll",
+      "required": true
+    },
+    {
+      "name": "x",
+      "type": "number",
+      "description": "X coordinate",
+      "required": false
+    },
+    {
+      "name": "y",
+      "type": "number",
+      "description": "Y coordinate",
+      "required": false
+    }
+  ],
+  "execution": {
+    "type": "python_script",
+    "entry_point": "mouse.py",
+    "timeout": 10,
+    "memory_limit": "128M"
+  },
+  "tags": ["desktop", "mouse"],
+  "verified": true
+}

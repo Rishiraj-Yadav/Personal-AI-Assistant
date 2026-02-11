@@ -1,0 +1,29 @@
+{
+  "name": "desktop_app_launcher",
+  "version": "1.0.0",
+  "author": "openclaw@example.com",
+  "description": "Opens applications on the user's desktop (Chrome, Task Manager, Notepad, etc.)",
+  "permissions": ["desktop.app_control"],
+  "parameters": [
+    {
+      "name": "app",
+      "type": "string",
+      "description": "Application name: chrome, firefox, notepad, task manager, calculator, etc.",
+      "required": true
+    }
+  ],
+  "execution": {
+    "type": "python_script",
+    "entry_point": "launcher.py",
+    "timeout": 15,
+    "memory_limit": "128M",
+    "cpu_limit": 0.5
+  },
+  "tags": ["desktop", "applications", "launcher"],
+  "examples": [
+    "Open Chrome",
+    "Open Task Manager",
+    "Launch Calculator"
+  ],
+  "verified": true
+}

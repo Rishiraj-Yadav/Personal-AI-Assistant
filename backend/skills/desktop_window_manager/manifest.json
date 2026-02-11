@@ -1,0 +1,31 @@
+{
+  "name": "desktop_window_manager",
+  "version": "1.0.0",
+  "author": "openclaw@example.com",
+  "description": "Manages desktop windows",
+  "permissions": ["desktop.window"],
+  "parameters": [
+    {
+      "name": "action",
+      "type": "string",
+      "description": "Action: list, focus, minimize",
+      "required": true
+    },
+    {
+      "name": "title",
+      "type": "string",
+      "description": "Window title",
+      "required": false
+    }
+  ],
+  "execution": {
+    "type": "python_script",
+    "entry_point": "window.py",
+    "timeout": 10,
+    "memory_limit": "128M",
+    "cpu_limit": 0.5,
+    "environment": {}
+  },
+  "tags": ["desktop"],
+  "verified": true
+}

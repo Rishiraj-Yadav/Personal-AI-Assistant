@@ -1,0 +1,35 @@
+{
+  "name": "desktop_keyboard",
+  "version": "1.0.0",
+  "author": "openclaw@example.com",
+  "description": "Controls keyboard input",
+  "permissions": ["desktop.keyboard"],
+  "parameters": [
+    {
+      "name": "action",
+      "type": "string",
+      "description": "Action: type, press, hotkey",
+      "required": true
+    },
+    {
+      "name": "text",
+      "type": "string",
+      "description": "Text to type",
+      "required": false
+    },
+    {
+      "name": "key",
+      "type": "string",
+      "description": "Key to press",
+      "required": false
+    }
+  ],
+  "execution": {
+    "type": "python_script",
+    "entry_point": "keyboard.py",
+    "timeout": 10,
+    "memory_limit": "128M"
+  },
+  "tags": ["desktop", "keyboard"],
+  "verified": true
+}

@@ -1,0 +1,40 @@
+# Desktop Agent Dependencies
+# Install with: pip install -r requirements.txt
+
+# Core web framework
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+pydantic==2.5.3
+
+# Desktop control
+pyautogui==0.9.54
+pynput==1.7.6
+pillow==10.1.0
+
+# Computer vision and OCR
+opencv-python==4.9.0.80
+pytesseract==0.3.10
+numpy==1.26.3
+
+# System and process management
+psutil==5.9.8
+
+# Screenshot and clipboard
+mss==9.0.1
+pyperclip==1.8.2
+
+# Platform-specific (installed conditionally)
+# pywin32==306  # Windows only
+# pyobjc-framework-Quartz==10.1  # macOS only
+# python-xlib==0.33  # Linux only
+
+# Utilities
+requests==2.31.0
+python-dotenv==1.0.0
+loguru==0.7.2
+
+# Image processing
+# Pillow==10.1.0
+
+# Optional: AI/ML for advanced features
+# easyocr==1.7.0  # Better OCR than tesseract

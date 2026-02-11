@@ -16,6 +16,14 @@ class PermissionScope(str, Enum):
     MEMORY_READ = "memory.read"
     MEMORY_WRITE = "memory.write"
     SCREENSHOT = "screenshot"
+    
+    
+     # ADD THESE DESKTOP PERMISSIONS
+    DESKTOP_SCREENSHOT = "desktop.screenshot"
+    DESKTOP_MOUSE = "desktop.mouse"
+    DESKTOP_KEYBOARD = "desktop.keyboard"
+    DESKTOP_APP_CONTROL = "desktop.app_control"
+    DESKTOP_WINDOW = "desktop.window"
 
 
 class SkillType(str, Enum):
