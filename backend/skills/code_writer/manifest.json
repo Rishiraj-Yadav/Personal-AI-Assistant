@@ -1,0 +1,43 @@
+{
+  "name": "code_writer",
+  "version": "1.0.0",
+  "author": "openclaw@example.com",
+  "description": "Writes code to files after successful generation/execution",
+  "permissions": ["file.write", "code.generate"],
+  "parameters": [
+    {
+      "name": "code",
+      "type": "string",
+      "description": "Code content to write",
+      "required": true
+    },
+    {
+      "name": "filename",
+      "type": "string",
+      "description": "Filename (e.g., script.py, app.js)",
+      "required": true
+    },
+    {
+      "name": "description",
+      "type": "string",
+      "description": "What the code does",
+      "required": false
+    },
+    {
+      "name": "language",
+      "type": "string",
+      "description": "Programming language",
+      "required": false
+    }
+  ],
+  "execution": {
+    "type": "python_script",
+    "entry_point": "writer.py",
+    "timeout": 30,
+    "memory_limit": "128M",
+    "cpu_limit": 0.5,
+    "environment": {}
+  },
+  "tags": ["code", "file", "write"],
+  "verified": true
+}

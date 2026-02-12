@@ -1,0 +1,47 @@
+{
+  "name": "file_organizer",
+  "version": "1.0.0",
+  "author": "openclaw@example.com",
+  "description": "Auto-organize files by type, date, or size into subdirectories",
+  "permissions": ["file.organize", "file.write"],
+  "parameters": [
+    {
+      "name": "location",
+      "type": "string",
+      "description": "Directory to organize",
+      "required": true
+    },
+    {
+      "name": "method",
+      "type": "string",
+      "description": "Organization method: 'type', 'date', or 'size'",
+      "required": false
+    },
+    {
+      "name": "create_subdirs",
+      "type": "boolean",
+      "description": "Create subdirectories for categories (default: true)",
+      "required": false
+    },
+    {
+      "name": "dry_run",
+      "type": "boolean",
+      "description": "Preview changes without executing (default: false)",
+      "required": false
+    }
+  ],
+  "execution": {
+    "type": "python_script",
+    "entry_point": "organizer.py",
+    "timeout": 60,
+    "memory_limit": "256M",
+    "cpu_limit": 0.5
+  },
+  "tags": ["organize", "cleanup", "folders", "automation"],
+  "examples": [
+    "Organize my Downloads folder",
+    "Sort Desktop files by date",
+    "Organize pictures by file type"
+  ],
+  "verified": true
+}

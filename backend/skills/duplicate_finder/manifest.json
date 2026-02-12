@@ -1,0 +1,46 @@
+{
+  "name": "duplicate_finder",
+  "version": "1.0.0",
+  "author": "openclaw@example.com",
+  "description": "Find duplicate files by content hash or filename",
+  "permissions": ["file.search.system"],
+  "parameters": [
+    {
+      "name": "location",
+      "type": "string",
+      "description": "Directory to search for duplicates",
+      "required": true
+    },
+    {
+      "name": "method",
+      "type": "string",
+      "description": "Method: 'hash' (content) or 'name' (filename)",
+      "required": false
+    },
+    {
+      "name": "min_size",
+      "type": "number",
+      "description": "Minimum file size in bytes (default: 1024)",
+      "required": false
+    },
+    {
+      "name": "extensions",
+      "type": "array",
+      "description": "List of file extensions to check (e.g., ['.jpg', '.png'])",
+      "required": false
+    }
+  ],
+  "execution": {
+    "type": "python_script",
+    "entry_point": "finder.py",
+    "timeout": 60,
+    "memory_limit": "512M",
+    "cpu_limit": 1.0
+  },
+  "tags": ["duplicates", "cleanup", "storage", "optimization"],
+  "examples": [
+    "Find duplicate files in Downloads",
+    "Find duplicate images in Pictures folder"
+  ],
+  "verified": true
+}

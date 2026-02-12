@@ -1,5 +1,5 @@
 """
-Desktop Agent Service
+Desktop Agent Service - UPDATED FOR PHASE 1
 Main HTTP server that exposes desktop control capabilities
 Runs on host machine (not in Docker) to access desktop
 """
@@ -17,6 +17,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from config import settings, save_api_key
 from skills.safety_manager import safety_manager
+
+# Existing desktop skills
 from skills.screenshot import screenshot_skill
 from skills.mouse_control import mouse_control_skill
 from skills.keyboard_control import keyboard_control_skill
@@ -24,12 +26,22 @@ from skills.app_launcher import app_launcher_skill
 from skills.window_manager import window_manager_skill
 from skills.screen_reader import screen_reader_skill
 
+# PHASE 1 SKILLS - NEW
+from skills.system_file_finder import system_file_finder_skill
+from skills.content_searcher import content_searcher_skill
+from skills.duplicate_finder import duplicate_finder_skill
+from skills.file_organizer import file_organizer_skill
+from skills.bulk_operations import bulk_operations_skill
+from skills.file_archiver import file_archiver_skill
+from skills.file_converter import file_converter_skill
+from skills.metadata_editor import metadata_editor_skill
+
 
 # Initialize FastAPI
 app = FastAPI(
     title="Desktop Agent Service",
     description="Exposes desktop control capabilities via HTTP API",
-    version="1.0.0"
+    version="2.0.0"  # Updated to 2.0.0 for Phase 1
 )
 
 # CORS - allow backend to access this service
@@ -67,14 +79,25 @@ def verify_api_key(x_api_key: str = Header(...)):
     return x_api_key
 
 
-# Skill registry
+# Skill registry - UPDATED WITH PHASE 1 SKILLS
 SKILLS = {
+    # Existing desktop control skills
     "screenshot": screenshot_skill,
     "mouse_control": mouse_control_skill,
     "keyboard_control": keyboard_control_skill,
     "app_launcher": app_launcher_skill,
     "window_manager": window_manager_skill,
-    "screen_reader": screen_reader_skill
+    "screen_reader": screen_reader_skill,
+    
+    # PHASE 1: Enhanced file & system operations
+    "system_file_finder": system_file_finder_skill,
+    "content_searcher": content_searcher_skill,
+    "duplicate_finder": duplicate_finder_skill,
+    "file_organizer": file_organizer_skill,
+    "bulk_operations": bulk_operations_skill,
+    "file_archiver": file_archiver_skill,
+    "file_converter": file_converter_skill,
+    "metadata_editor": metadata_editor_skill,
 }
 
 
@@ -83,10 +106,12 @@ async def root():
     """Root endpoint"""
     return {
         "service": "Desktop Agent",
-        "version": "1.0.0",
+        "version": "2.0.0",
+        "phase": "Phase 1 - Enhanced File Operations",
         "status": "running",
         "safe_mode": settings.SAFE_MODE,
-        "skills": list(SKILLS.keys())
+        "skills": list(SKILLS.keys()),
+        "skills_count": len(SKILLS)
     }
 
 
@@ -96,15 +121,29 @@ async def health():
     return {
         "status": "healthy",
         "safe_mode": settings.SAFE_MODE,
-        "skills_count": len(SKILLS)
+        "skills_count": len(SKILLS),
+        "phase": "Phase 1"
     }
 
 
 @app.get("/skills")
 async def list_skills(api_key: str = Depends(verify_api_key)):
     """List available skills"""
+    skills_info = []
+    
+    for name, skill in SKILLS.items():
+        skills_info.append({
+            "name": name,
+            "type": type(skill).__name__,
+            "phase": "Phase 1" if name in [
+                "system_file_finder", "content_searcher", "duplicate_finder",
+                "file_organizer", "bulk_operations", "file_archiver",
+                "file_converter", "metadata_editor"
+            ] else "Base"
+        })
+    
     return {
-        "skills": list(SKILLS.keys()),
+        "skills": skills_info,
         "count": len(SKILLS),
         "safe_mode": settings.SAFE_MODE
     }
@@ -132,7 +171,7 @@ async def execute_skill(
         if skill_name not in SKILLS:
             raise HTTPException(
                 status_code=404,
-                detail=f"Skill not found: {skill_name}"
+                detail=f"Skill not found: {skill_name}. Available: {list(SKILLS.keys())}"
             )
         
         # Override safe mode if requested
@@ -230,15 +269,24 @@ async def resume(api_key: str = Depends(verify_api_key)):
 
 def startup_banner():
     """Print startup banner with important info"""
-    print("\n" + "="*60)
-    print("🖥️  DESKTOP AGENT SERVICE")
-    print("="*60)
-    print(f"Version: 1.0.0")
+    print("\n" + "="*70)
+    print("🖥️  DESKTOP AGENT SERVICE - PHASE 1")
+    print("="*70)
+    print(f"Version: 2.0.0")
     print(f"Host: {settings.HOST}:{settings.PORT}")
     print(f"Safe Mode: {'ENABLED ✓' if settings.SAFE_MODE else 'DISABLED ⚠️'}")
     print(f"Confirmation Required: {settings.REQUIRE_CONFIRMATION}")
-    print(f"Available Skills: {', '.join(SKILLS.keys())}")
-    print("="*60)
+    print("="*70)
+    print("Available Skills:")
+    print("  BASE SKILLS (6):")
+    print("    - screenshot, mouse_control, keyboard_control")
+    print("    - app_launcher, window_manager, screen_reader")
+    print("  PHASE 1 SKILLS (8):")
+    print("    - system_file_finder, content_searcher, duplicate_finder")
+    print("    - file_organizer, bulk_operations, file_archiver")
+    print("    - file_converter, metadata_editor")
+    print(f"  TOTAL: {len(SKILLS)} skills")
+    print("="*70)
     
     if not settings.SAFE_MODE:
         print("⚠️  WARNING: Safe mode is DISABLED!")
@@ -249,10 +297,10 @@ def startup_banner():
         print("  Actions will be logged but not executed")
         print("  Use /resume endpoint to disable safe mode")
     
-    print("="*60)
+    print("="*70)
     print(f"API Key: {settings.API_KEY[:20]}...")
     print(f"Key saved to: config/api_key.txt")
-    print("="*60 + "\n")
+    print("="*70 + "\n")
 
 
 if __name__ == "__main__":

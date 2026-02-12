@@ -9,6 +9,7 @@ services:
     environment:
       - GROQ_API_KEY=${GROQ_API_KEY}
       - GROQ_MODEL=${GROQ_MODEL:-llama-3.3-70b-versatile}
+      - E2B_API_KEY=${E2B_API_KEY}  # NEW - E2B API key
       - DEBUG=${DEBUG:-false}
       # CRITICAL FIX: Tell backend how to reach Desktop Agent on host
       - DESKTOP_AGENT_URL=http://host.docker.internal:7777
@@ -27,6 +28,8 @@ services:
       timeout: 10s
       retries: 3
       start_period: 10s
+    networks:
+      - openclaw-network
 
   frontend:
     build:
@@ -43,10 +46,27 @@ services:
       - ./frontend/src:/app/src
       - ./frontend/public:/app/public
     restart: unless-stopped
+    networks:
+      - openclaw-network
+
+
 
 networks:
-  default:
-    name: openclaw-network
+  openclaw-network:
+    driver: bridge
+
+# networks:
+#   default:
+#     name: openclaw-network
+
+
+
+
+
+
+
+
+
 
 # version: '3.8'
 

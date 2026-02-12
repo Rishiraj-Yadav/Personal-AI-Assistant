@@ -1,0 +1,31 @@
+{
+  "name": "code_generator",
+  "version": "1.0.0",
+  "author": "openclaw@example.com",
+  "description": "Generates code from natural language descriptions",
+  "permissions": ["code.generate"],
+  "parameters": [
+    {
+      "name": "description",
+      "type": "string",
+      "description": "What the code should do",
+      "required": true
+    },
+    {
+      "name": "language",
+      "type": "string",
+      "description": "Programming language (python, javascript, etc)",
+      "required": false
+    }
+  ],
+  "execution": {
+    "type": "python_script",
+    "entry_point": "generator.py",
+    "timeout": 60,
+    "memory_limit": "256M",
+    "cpu_limit": 0.5,
+    "environment": {}
+  },
+  "tags": ["code", "generation"],
+  "verified": true
+}

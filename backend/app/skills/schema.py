@@ -1,5 +1,5 @@
 """
-Skill manifest schema and validation
+Skill manifest schema and validation - UPDATED
 """
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional, Literal
@@ -17,13 +17,31 @@ class PermissionScope(str, Enum):
     MEMORY_WRITE = "memory.write"
     SCREENSHOT = "screenshot"
     
-    
-     # ADD THESE DESKTOP PERMISSIONS
+    # Desktop automation permissions
     DESKTOP_SCREENSHOT = "desktop.screenshot"
     DESKTOP_MOUSE = "desktop.mouse"
     DESKTOP_KEYBOARD = "desktop.keyboard"
     DESKTOP_APP_CONTROL = "desktop.app_control"
     DESKTOP_WINDOW = "desktop.window"
+    
+    # Code execution permissions
+    CODE_GENERATE = "code.generate"
+    CODE_EXECUTE = "code.execute"
+    CODE_WRITE = "code.write"  # NEW - For code_writer skill
+    SANDBOX_ACCESS = "sandbox.access"
+    GIT_OPERATIONS = "git.operations"
+    
+         
+ # NEW: Phase 1 - Enhanced file permissions
+    FILE_SEARCH_SYSTEM = "file.search.system"      # Search entire computer
+    FILE_SEARCH_CONTENT = "file.search.content"    # Search file contents
+    FILE_BULK_OPS = "file.bulk.operations"         # Bulk rename, move, delete
+    FILE_ARCHIVE = "file.archive"                  # Zip/unzip operations
+    FILE_CONVERT = "file.convert"                  # File format conversion
+    FILE_METADATA = "file.metadata"                # Edit file metadata
+    FILE_ORGANIZE = "file.organize"                # Auto-organize files
+
+
 
 
 class SkillType(str, Enum):
@@ -56,17 +74,17 @@ class SkillParameter(BaseModel):
 class SkillExecution(BaseModel):
     """Execution configuration for a skill"""
     type: SkillType
-    entry_point: str  # Path to script or command
-    timeout: int = 30  # Timeout in seconds
-    memory_limit: str = "512M"  # Memory limit
-    cpu_limit: float = 1.0  # CPU cores
+    entry_point: str
+    timeout: int = 30
+    memory_limit: str = "512M"
+    cpu_limit: float = 1.0
     environment: Dict[str, str] = {}
     
     class Config:
         json_schema_extra = {
             "example": {
-                "type": "playwright_script",
-                "entry_point": "scraper.py",
+                "type": "python_script",
+                "entry_point": "script.py",
                 "timeout": 30,
                 "memory_limit": "512M"
             }
@@ -74,52 +92,39 @@ class SkillExecution(BaseModel):
 
 
 class SkillManifest(BaseModel):
-    """
-    Skill manifest - defines a skill's metadata, permissions, and execution
-    """
-    # Metadata
+    """Skill manifest - defines skill metadata, permissions, and execution"""
     name: str = Field(..., pattern=r"^[a-z0-9_]+$")
     version: str
     author: str
     description: str
-    
-    # Permissions
     permissions: List[PermissionScope] = []
-    
-    # Parameters
     parameters: List[SkillParameter] = []
-    
-    # Execution
     execution: SkillExecution
-    
-    # Optional metadata
     tags: List[str] = []
     examples: List[str] = []
-    
-    # Security
     signature: Optional[str] = None
     verified: bool = False
     
     class Config:
         json_schema_extra = {
             "example": {
-                "name": "web_scraper",
-                "version": "0.1.0",
+                "name": "code_generator",
+                "version": "1.0.0",
                 "author": "openclaw@example.com",
-                "description": "Scrapes content from web pages",
-                "permissions": ["network.external", "browser.automate"],
+                "description": "Generates code from descriptions",
+                "permissions": ["code.generate"],
                 "parameters": [
                     {
-                        "name": "url",
+                        "name": "description",
                         "type": "string",
-                        "description": "URL to scrape",
+                        "description": "What the code should do",
                         "required": True
                     }
                 ],
                 "execution": {
-                    "type": "playwright_script",
-                    "entry_point": "scraper.py",
-                    "timeout": 30
+                    "type": "python_script",
+                    "entry_point": "generator.py",
+                    "timeout": 60
                 }
             }
         }
@@ -139,15 +144,18 @@ class SkillExecutionResult(BaseModel):
     skill_name: str
     output: Any
     error: Optional[str] = None
-    execution_time: float  # seconds
+    execution_time: float
     resources_used: Dict[str, Any] = {}
     
     class Config:
         json_schema_extra = {
             "example": {
                 "success": True,
-                "skill_name": "web_scraper",
-                "output": {"title": "Example Site", "content": "..."},
-                "execution_time": 2.5
+                "skill_name": "code_generator",
+                "output": {"code": "print('Hello')", "language": "python"},
+                "execution_time": 1.5
             }
         }
+        
+        
+   

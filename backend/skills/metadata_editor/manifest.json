@@ -1,0 +1,47 @@
+{
+  "name": "metadata_editor",
+  "version": "1.0.0",
+  "author": "openclaw@example.com",
+  "description": "View and edit file metadata (EXIF, properties, tags)",
+  "permissions": ["file.metadata", "file.read", "file.write"],
+  "parameters": [
+    {
+      "name": "action",
+      "type": "string",
+      "description": "Action: 'view' or 'edit'",
+      "required": true
+    },
+    {
+      "name": "file_path",
+      "type": "string",
+      "description": "Path to file",
+      "required": true
+    },
+    {
+      "name": "metadata",
+      "type": "object",
+      "description": "Metadata to set (for edit action)",
+      "required": false
+    },
+    {
+      "name": "remove_exif",
+      "type": "boolean",
+      "description": "Remove all EXIF data from image",
+      "required": false
+    }
+  ],
+  "execution": {
+    "type": "python_script",
+    "entry_point": "metadata.py",
+    "timeout": 30,
+    "memory_limit": "256M",
+    "cpu_limit": 0.5
+  },
+  "tags": ["metadata", "exif", "properties", "tags"],
+  "examples": [
+    "Show metadata for photo.jpg",
+    "Remove EXIF from image",
+    "View file properties"
+  ],
+  "verified": true
+}

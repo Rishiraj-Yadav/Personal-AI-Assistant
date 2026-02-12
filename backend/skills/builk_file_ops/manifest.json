@@ -1,0 +1,71 @@
+{
+  "name": "bulk_file_ops",
+  "version": "1.0.0",
+  "author": "openclaw@example.com",
+  "description": "Bulk rename, move, copy, or delete multiple files at once",
+  "permissions": ["file.bulk.operations", "file.write"],
+  "parameters": [
+    {
+      "name": "action",
+      "type": "string",
+      "description": "Action: 'rename', 'move', 'copy', or 'delete'",
+      "required": true
+    },
+    {
+      "name": "location",
+      "type": "string",
+      "description": "Directory containing files to process",
+      "required": true
+    },
+    {
+      "name": "pattern",
+      "type": "string",
+      "description": "File pattern to match (*.txt, image*, etc.)",
+      "required": false
+    },
+    {
+      "name": "prefix",
+      "type": "string",
+      "description": "Add prefix to filenames (for rename)",
+      "required": false
+    },
+    {
+      "name": "suffix",
+      "type": "string",
+      "description": "Add suffix to filenames (for rename)",
+      "required": false
+    },
+    {
+      "name": "destination",
+      "type": "string",
+      "description": "Destination directory (for move/copy)",
+      "required": false
+    },
+    {
+      "name": "numbered",
+      "type": "boolean",
+      "description": "Add sequential numbers to filenames",
+      "required": false
+    },
+    {
+      "name": "dry_run",
+      "type": "boolean",
+      "description": "Preview changes without executing",
+      "required": false
+    }
+  ],
+  "execution": {
+    "type": "python_script",
+    "entry_point": "bulk_ops.py",
+    "timeout": 60,
+    "memory_limit": "256M",
+    "cpu_limit": 0.5
+  },
+  "tags": ["bulk", "rename", "batch", "operations"],
+  "examples": [
+    "Rename all .txt files to .md",
+    "Add prefix 'old_' to all files",
+    "Move all PDFs to Documents"
+  ],
+  "verified": true
+}

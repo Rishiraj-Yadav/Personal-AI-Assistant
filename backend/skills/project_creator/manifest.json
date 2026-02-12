@@ -1,0 +1,43 @@
+{
+  "name": "project_creator",
+  "version": "1.0.0",
+  "author": "openclaw@example.com",
+  "description": "Creates complete project structures from templates",
+  "permissions": ["file.write", "code.generate"],
+  "parameters": [
+    {
+      "name": "project_type",
+      "type": "string",
+      "description": "Type: flask, fastapi, react, nextjs, express",
+      "required": true
+    },
+    {
+      "name": "project_name",
+      "type": "string",
+      "description": "Project name (will create folder)",
+      "required": true
+    },
+    {
+      "name": "project_path",
+      "type": "string",
+      "description": "Where to create the project",
+      "required": false,
+      "default": "/workspace"
+    }
+  ],
+  "execution": {
+    "type": "python_script",
+    "entry_point": "creator.py",
+    "timeout": 60,
+    "memory_limit": "256M",
+    "cpu_limit": 0.5,
+    "environment": {}
+  },
+  "tags": ["project", "scaffold", "template"],
+  "examples": [
+    "Create a Flask API project",
+    "Set up a React application",
+    "Initialize a FastAPI service"
+  ],
+  "verified": true
+}

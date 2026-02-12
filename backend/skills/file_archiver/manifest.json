@@ -1,0 +1,59 @@
+{
+  "name": "file_archiver",
+  "version": "1.0.0",
+  "author": "openclaw@example.com",
+  "description": "Create and extract ZIP/TAR archives",
+  "permissions": ["file.archive", "file.read", "file.write"],
+  "parameters": [
+    {
+      "name": "action",
+      "type": "string",
+      "description": "Action: 'create' or 'extract'",
+      "required": true
+    },
+    {
+      "name": "source",
+      "type": "string",
+      "description": "File or folder to archive / Archive to extract",
+      "required": true
+    },
+    {
+      "name": "destination",
+      "type": "string",
+      "description": "Output path (optional)",
+      "required": false
+    },
+    {
+      "name": "format",
+      "type": "string",
+      "description": "Archive format: 'zip', 'tar', 'tar.gz' (default: zip)",
+      "required": false
+    },
+    {
+      "name": "include_pattern",
+      "type": "string",
+      "description": "Include only matching files (for create)",
+      "required": false
+    },
+    {
+      "name": "exclude_pattern",
+      "type": "string",
+      "description": "Exclude matching files (for create)",
+      "required": false
+    }
+  ],
+  "execution": {
+    "type": "python_script",
+    "entry_point": "archiver.py",
+    "timeout": 120,
+    "memory_limit": "512M",
+    "cpu_limit": 1.0
+  },
+  "tags": ["archive", "zip", "compress", "extract"],
+  "examples": [
+    "Create ZIP of Documents folder",
+    "Extract archive.zip",
+    "Compress project folder to tar.gz"
+  ],
+  "verified": true
+}

@@ -1,0 +1,43 @@
+{
+  "name": "git_manager",
+  "version": "1.0.0",
+  "author": "openclaw@example.com",
+  "description": "Manages git operations",
+  "permissions": ["git.operations"],
+  "parameters": [
+    {
+      "name": "action",
+      "type": "string",
+      "description": "Action: init, commit, push, pull, status, branch",
+      "required": true
+    },
+    {
+      "name": "repository_path",
+      "type": "string",
+      "description": "Path to git repository",
+      "required": true
+    },
+    {
+      "name": "message",
+      "type": "string",
+      "description": "Commit message (for commit action)",
+      "required": false
+    },
+    {
+      "name": "branch",
+      "type": "string",
+      "description": "Branch name (for branch/checkout actions)",
+      "required": false
+    }
+  ],
+  "execution": {
+    "type": "python_script",
+    "entry_point": "git_ops.py",
+    "timeout": 30,
+    "memory_limit": "128M",
+    "cpu_limit": 0.5,
+    "environment": {}
+  },
+  "tags": ["git", "version-control"],
+  "verified": true
+}

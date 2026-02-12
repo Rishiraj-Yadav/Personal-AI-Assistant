@@ -1,0 +1,43 @@
+{
+  "name": "sandbox_executor",
+  "version": "1.0.0",
+  "author": "openclaw@example.com",
+  "description": "Executes code safely in E2B cloud sandbox",
+  "permissions": ["code.execute", "sandbox.access"],
+  "parameters": [
+    {
+      "name": "code",
+      "type": "string",
+      "description": "Code to execute",
+      "required": true
+    },
+    {
+      "name": "language",
+      "type": "string",
+      "description": "Language: python or javascript",
+      "required": false
+    },
+    {
+      "name": "packages",
+      "type": "array",
+      "description": "Packages to install",
+      "required": false
+    },
+    {
+      "name": "timeout",
+      "type": "number",
+      "description": "Timeout in seconds",
+      "required": false
+    }
+  ],
+  "execution": {
+    "type": "python_script",
+    "entry_point": "executor.py",
+    "timeout": 120,
+    "memory_limit": "256M",
+    "cpu_limit": 0.5,
+    "environment": {}
+  },
+  "tags": ["code", "execution", "sandbox"],
+  "verified": true
+}

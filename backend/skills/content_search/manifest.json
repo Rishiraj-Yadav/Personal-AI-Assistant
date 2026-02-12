@@ -1,0 +1,58 @@
+{
+  "name": "content_search",
+  "version": "1.0.0",
+  "author": "openclaw@example.com",
+  "description": "Search for text inside files (grep functionality)",
+  "permissions": ["file.search.content"],
+  "parameters": [
+    {
+      "name": "search_term",
+      "type": "string",
+      "description": "Text to search for inside files",
+      "required": true
+    },
+    {
+      "name": "location",
+      "type": "string",
+      "description": "Directory to search in",
+      "required": false
+    },
+    {
+      "name": "file_pattern",
+      "type": "string",
+      "description": "File pattern to match (*.py, *.txt, etc.)",
+      "required": false
+    },
+    {
+      "name": "case_sensitive",
+      "type": "boolean",
+      "description": "Case-sensitive search",
+      "required": false
+    },
+    {
+      "name": "regex",
+      "type": "boolean",
+      "description": "Treat search_term as regular expression",
+      "required": false
+    },
+    {
+      "name": "max_results",
+      "type": "number",
+      "description": "Maximum number of files to return",
+      "required": false
+    }
+  ],
+  "execution": {
+    "type": "python_script",
+    "entry_point": "grep.py",
+    "timeout": 30,
+    "memory_limit": "256M",
+    "cpu_limit": 0.5
+  },
+  "tags": ["search", "content", "grep", "text"],
+  "examples": [
+    "Search for 'TODO' in all Python files",
+    "Find files containing 'password'"
+  ],
+  "verified": true
+}

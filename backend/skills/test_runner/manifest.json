@@ -1,0 +1,39 @@
+{
+  "name": "test_runner",
+  "version": "1.0.0",
+  "author": "openclaw@example.com",
+  "description": "Runs tests in sandbox environment",
+  "permissions": ["code.execute", "sandbox.access"],
+  "parameters": [
+    {
+      "name": "test_file",
+      "type": "string",
+      "description": "Test file path or content",
+      "required": true
+    },
+    {
+      "name": "framework",
+      "type": "string",
+      "description": "Test framework: pytest, unittest, jest, mocha",
+      "required": false,
+      "default": "pytest"
+    },
+    {
+      "name": "source_files",
+      "type": "object",
+      "description": "Source files to test",
+      "required": false,
+      "default": {}
+    }
+  ],
+  "execution": {
+    "type": "python_script",
+    "entry_point": "runner.py",
+    "timeout": 60,
+    "memory_limit": "512M",
+    "cpu_limit": 1.0,
+    "environment": {}
+  },
+  "tags": ["testing", "sandbox"],
+  "verified": true
+}

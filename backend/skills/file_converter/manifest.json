@@ -1,0 +1,53 @@
+{
+  "name": "file_converter",
+  "version": "1.0.0",
+  "author": "openclaw@example.com",
+  "description": "Convert files between formats (images, documents)",
+  "permissions": ["file.convert", "file.read", "file.write"],
+  "parameters": [
+    {
+      "name": "source",
+      "type": "string",
+      "description": "Source file path",
+      "required": true
+    },
+    {
+      "name": "target_format",
+      "type": "string",
+      "description": "Target format (jpg, png, webp, gif, etc.)",
+      "required": true
+    },
+    {
+      "name": "destination",
+      "type": "string",
+      "description": "Output file path (optional)",
+      "required": false
+    },
+    {
+      "name": "quality",
+      "type": "number",
+      "description": "Image quality for lossy formats (1-100, default: 95)",
+      "required": false
+    },
+    {
+      "name": "resize",
+      "type": "array",
+      "description": "Resize image to [width, height]",
+      "required": false
+    }
+  ],
+  "execution": {
+    "type": "python_script",
+    "entry_point": "converter.py",
+    "timeout": 60,
+    "memory_limit": "512M",
+    "cpu_limit": 1.0
+  },
+  "tags": ["convert", "image", "format", "transformation"],
+  "examples": [
+    "Convert PNG to JPG",
+    "Convert image to WebP",
+    "Resize and convert to JPEG"
+  ],
+  "verified": true
+}

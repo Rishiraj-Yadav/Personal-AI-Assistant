@@ -1,0 +1,65 @@
+{
+  "name": "system_file_search",
+  "version": "1.0.0",
+  "author": "openclaw@example.com",
+  "description": "Search for files anywhere on the computer by name, extension, date, or size",
+  "permissions": ["file.search.system"],
+  "parameters": [
+    {
+      "name": "query",
+      "type": "string",
+      "description": "Filename pattern (supports wildcards like *.pdf)",
+      "required": false
+    },
+    {
+      "name": "extension",
+      "type": "string",
+      "description": "File extension filter (.pdf, .jpg, etc.)",
+      "required": false
+    },
+    {
+      "name": "location",
+      "type": "string",
+      "description": "Specific folder to search in",
+      "required": false
+    },
+    {
+      "name": "modified_days",
+      "type": "number",
+      "description": "Files modified in last N days",
+      "required": false
+    },
+    {
+      "name": "size_min",
+      "type": "number",
+      "description": "Minimum file size in bytes",
+      "required": false
+    },
+    {
+      "name": "size_max",
+      "type": "number",
+      "description": "Maximum file size in bytes",
+      "required": false
+    },
+    {
+      "name": "limit",
+      "type": "number",
+      "description": "Maximum number of results to return (default: 100)",
+      "required": false
+    }
+  ],
+  "execution": {
+    "type": "python_script",
+    "entry_point": "search.py",
+    "timeout": 30,
+    "memory_limit": "256M",
+    "cpu_limit": 0.5
+  },
+  "tags": ["search", "files", "system"],
+  "examples": [
+    "Find all PDF files in Documents",
+    "Find files modified in last 7 days",
+    "Search for *.py files"
+  ],
+  "verified": true
+}
