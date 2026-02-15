@@ -1,5 +1,6 @@
 """
-API Routes for OpenClaw Agent
+Chat API Routes
+Main chat endpoint and conversation management
 """
 from fastapi import APIRouter, HTTPException, status
 from app.models import (

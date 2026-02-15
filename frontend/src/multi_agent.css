@@ -1,0 +1,329 @@
+/* Multi-Agent Enhanced Styles */
+
+/* Chat Controls with Toggle */
+.chat-controls {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1rem;
+  border-bottom: 2px solid #e0e0e0;
+  background: #f8f9fa;
+}
+
+.multi-agent-toggle {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.multi-agent-toggle label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+  font-weight: 500;
+}
+
+.multi-agent-toggle input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  cursor: pointer;
+}
+
+.toggle-label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.badge {
+  background: #4CAF50;
+  color: white;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 0.75rem;
+  font-weight: bold;
+}
+
+.toggle-hint {
+  color: #666;
+  font-size: 0.85rem;
+  margin-left: 1.5rem;
+}
+
+/* Progress Bar */
+.progress-bar {
+  background: #e3f2fd;
+  border-left: 4px solid #2196F3;
+  padding: 0.75rem 1rem;
+  margin: 0.5rem;
+  border-radius: 4px;
+  animation: pulse 2s infinite;
+}
+
+.progress-message {
+  color: #1976D2;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+/* Code Block Styling */
+.code-block {
+  margin-top: 1rem;
+  background: #1e1e1e;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.code-header {
+  background: #2d2d2d;
+  padding: 0.5rem 1rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid #444;
+}
+
+.code-language {
+  color: #4CAF50;
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.btn-copy {
+  background: #4CAF50;
+  color: white;
+  border: none;
+  padding: 0.3rem 0.8rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  transition: background 0.2s;
+}
+
+.btn-copy:hover {
+  background: #45a049;
+}
+
+.code-block pre {
+  margin: 0;
+  padding: 1rem;
+  overflow-x: auto;
+}
+
+.code-block code {
+  color: #e0e0e0;
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+/* File Info */
+.file-info {
+  background: #fff3cd;
+  border-left: 4px solid #ffc107;
+  padding: 0.5rem 1rem;
+  margin-top: 0.5rem;
+  border-radius: 4px;
+  font-size: 0.9rem;
+}
+
+.file-info code {
+  background: #fff;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-family: monospace;
+}
+
+/* Multi-Agent Metadata */
+.metadata-row {
+  display: flex;
+  gap: 1rem;
+  margin-top: 0.5rem;
+  font-size: 0.85rem;
+}
+
+.multi-agent-info {
+  background: #e8f5e9;
+  padding: 0.5rem;
+  border-radius: 4px;
+  border-left: 3px solid #4CAF50;
+}
+
+.task-type {
+  font-weight: 600;
+  color: #2e7d32;
+}
+
+.iterations {
+  color: #1976d2;
+  font-weight: 600;
+}
+
+/* Agent Path */
+.agent-path {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+  padding: 0.5rem;
+  background: #f3e5f5;
+  border-radius: 4px;
+  flex-wrap: wrap;
+}
+
+.agent-path-label {
+  font-weight: 600;
+  color: #6a1b9a;
+  font-size: 0.85rem;
+}
+
+.agent-badge {
+  background: #9c27b0;
+  color: white;
+  padding: 2px 10px;
+  border-radius: 12px;
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+/* Mode Cards (Welcome Screen) */
+.mode-cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  margin: 2rem 0;
+}
+
+.mode-card {
+  background: white;
+  border: 2px solid #e0e0e0;
+  border-radius: 8px;
+  padding: 1.5rem;
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.mode-card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+}
+
+.mode-card.highlight {
+  border-color: #4CAF50;
+  background: linear-gradient(135deg, #f1f8f4 0%, #ffffff 100%);
+}
+
+.mode-card h3 {
+  margin-top: 0;
+  color: #333;
+}
+
+.mode-card ul {
+  list-style: none;
+  padding: 0;
+}
+
+.mode-card li {
+  padding: 0.3rem 0;
+  color: #666;
+}
+
+.mode-card.highlight li {
+  color: #2e7d32;
+  font-weight: 500;
+}
+
+/* Mode Indicator */
+.mode-indicator {
+  text-align: center;
+  padding: 0.5rem;
+  background: #f5f5f5;
+  border-top: 1px solid #e0e0e0;
+  font-size: 0.85rem;
+  color: #666;
+  font-weight: 500;
+}
+
+/* Responsive Design */
+@media (max-width: 768px) {
+  .mode-cards {
+    grid-template-columns: 1fr;
+  }
+  
+  .chat-controls {
+    flex-direction: column;
+    gap: 1rem;
+    align-items: stretch;
+  }
+  
+  .metadata-row {
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+}
+
+/* Loading Animation Enhancement */
+.loading {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.typing-indicator {
+  display: flex;
+  gap: 4px;
+}
+
+.typing-indicator span {
+  width: 8px;
+  height: 8px;
+  background: #4CAF50;
+  border-radius: 50%;
+  animation: bounce 1.4s infinite ease-in-out both;
+}
+
+.typing-indicator span:nth-child(1) {
+  animation-delay: -0.32s;
+}
+
+.typing-indicator span:nth-child(2) {
+  animation-delay: -0.16s;
+}
+
+@keyframes bounce {
+  0%, 80%, 100% {
+    transform: scale(0);
+  }
+  40% {
+    transform: scale(1);
+  }
+}
+
+/* Existing button styles enhancement */
+.btn-clear {
+  background: #f44336;
+  color: white;
+  border: none;
+  padding: 0.5rem 1rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: 500;
+  transition: background 0.2s;
+}
+
+.btn-clear:hover:not(:disabled) {
+  background: #da190b;
+}
+
+.btn-clear:disabled {
+  background: #ccc;
+  cursor: not-allowed;
+}

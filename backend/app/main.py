@@ -54,6 +54,11 @@ app.add_middleware(
 # Include API routes
 app.include_router(router, prefix="/api/v1", tags=["agent"])
 
+# backend/app/main.py
+from app.api.routes import multi_agent
+
+app.include_router(multi_agent.router)
+
 
 @app.get("/")
 async def root():

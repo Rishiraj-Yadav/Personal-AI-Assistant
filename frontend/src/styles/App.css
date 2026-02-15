@@ -403,3 +403,108 @@ body {
     width: 100%;
   }
 }
+
+
+/* File Tree Styles */
+.file-tree {
+  background: #1e1e1e;
+  border: 1px solid #333;
+  border-radius: 8px;
+  padding: 16px;
+  margin: 12px 0;
+  font-family: 'Monaco', 'Courier New', monospace;
+  font-size: 13px;
+}
+
+.file-tree-header {
+  font-weight: bold;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #444;
+  color: #4CAF50;
+}
+
+.file-item, .folder-item {
+  padding: 4px 0;
+  cursor: pointer;
+}
+
+.file-item:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.file-name {
+  color: #61dafb;
+  margin-left: 8px;
+}
+
+.folder-item {
+  color: #ffd700;
+  font-weight: 500;
+}
+
+.btn-copy-small {
+  background: #444;
+  border: none;
+  color: #fff;
+  padding: 2px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  margin-left: 8px;
+  font-size: 11px;
+}
+
+.btn-copy-small:hover {
+  background: #555;
+}
+
+/* Server Info Styles */
+.server-info {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  border-radius: 12px;
+  padding: 20px;
+  margin: 16px 0;
+  color: white;
+}
+
+.server-info.success {
+  background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+}
+
+.server-status {
+  font-size: 20px;
+  font-weight: bold;
+  margin-bottom: 12px;
+}
+
+.server-details {
+  font-size: 14px;
+  line-height: 1.8;
+}
+
+.server-details a {
+  color: #fff;
+  text-decoration: underline;
+  margin-left: 8px;
+}
+
+.server-details a:hover {
+  opacity: 0.8;
+}
+
+/* Project Display */
+.project-display {
+  margin-top: 16px;
+}
+
+.main-file-preview {
+  margin-top: 16px;
+}
+
+.preview-header {
+  background: #2d2d2d;
+  padding: 8px 16px;
+  border-radius: 6px 6px 0 0;
+  font-weight: 600;
+  color: #4CAF50;
+}

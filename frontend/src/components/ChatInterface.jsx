@@ -9,6 +9,8 @@ function ChatInterface({ conversationId, setConversationId }) {
   const [inputMessage, setInputMessage] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState(null)
+  const [useMultiAgent, setUseMultiAgent] = useState(false)  // NEW - Toggle for multi-agent
+  const [progress, setProgress] = useState(null)  // NEW - Progress updates
   const messagesEndRef = useRef(null)
 
   const scrollToBottom = () => {
@@ -17,7 +19,7 @@ function ChatInterface({ conversationId, setConversationId }) {
 
   useEffect(() => {
     scrollToBottom()
-  }, [messages])
+  }, [messages, progress])
 
   const sendMessage = async (e) => {
     e.preventDefault()
@@ -35,23 +37,38 @@ function ChatInterface({ conversationId, setConversationId }) {
     setInputMessage('')
     setIsLoading(true)
     setError(null)
+    setProgress(null)
 
     try {
-      const response = await axios.post(`${API_BASE_URL}/chat`, {
-        message: inputMessage,
-        conversation_id: conversationId,
-        user_id: 'web_user'
-      })
+      let response
+
+      if (useMultiAgent) {
+        // Use multi-agent endpoint for code generation
+        response = await sendWithMultiAgent(inputMessage)
+      } else {
+        // Use regular chat endpoint
+        response = await axios.post(`${API_BASE_URL}/chat`, {
+          message: inputMessage,
+          conversation_id: conversationId,
+          user_id: 'web_user'
+        })
+      }
 
       // Add assistant response
       const assistantMessage = {
         role: 'assistant',
         content: response.data.response,
-        timestamp: response.data.timestamp,
+        timestamp: response.data.timestamp || new Date().toISOString(),
         metadata: {
           model: response.data.model_used,
           tokens: response.data.tokens_used,
-          skills_used: response.data.skills_used || []
+          skills_used: response.data.skills_used || [],
+          // Multi-agent specific
+          task_type: response.data.task_type,
+          agent_path: response.data.agent_path,
+          iterations: response.data.metadata?.total_iterations,
+          code: response.data.code,
+          file_path: response.data.file_path
         }
       }
 
@@ -70,7 +87,71 @@ function ChatInterface({ conversationId, setConversationId }) {
       setMessages(prev => prev.slice(0, -1))
     } finally {
       setIsLoading(false)
+      setProgress(null)
     }
+  }
+
+  const sendWithMultiAgent = async (message) => {
+    // Use WebSocket for real-time updates
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(`ws://localhost:8000/api/v1/multi-agent/stream`)
+      let finalResult = null
+
+      ws.onopen = () => {
+        ws.send(JSON.stringify({
+          message: message,
+          conversation_id: conversationId,
+          max_iterations: 5
+        }))
+      }
+
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data)
+        
+        // Update progress based on message type
+        if (data.type === 'status') {
+          setProgress(data.message)
+        } else if (data.type === 'classification') {
+          setProgress(`📍 ${data.message}`)
+        } else if (data.type === 'iteration') {
+          setProgress(`🔄 Iteration ${data.iteration}/${data.total}: ${data.success ? '✅' : '⚠️'} ${data.message}`)
+        } else if (data.type === 'fixing') {
+          setProgress(`🔧 ${data.message}`)
+        } else if (data.type === 'complete') {
+          finalResult = data.result
+          ws.close()
+        } else if (data.type === 'error') {
+          reject(new Error(data.message))
+          ws.close()
+        }
+      }
+
+      ws.onerror = (error) => {
+        reject(error)
+        ws.close()
+      }
+
+      ws.onclose = () => {
+        if (finalResult) {
+          // Format as ChatResponse
+          resolve({
+            data: {
+              response: finalResult.response,
+              conversation_id: conversationId || 'multi_agent_conv',
+              timestamp: new Date().toISOString(),
+              model_used: 'Multi-Agent (Gemini)',
+              task_type: finalResult.task_type,
+              agent_path: finalResult.agent_path,
+              code: finalResult.code,
+              file_path: finalResult.file_path,
+              metadata: finalResult.metadata
+            }
+          })
+        } else {
+          reject(new Error('WebSocket closed without result'))
+        }
+      }
+    })
   }
 
   const clearConversation = async () => {
@@ -84,6 +165,7 @@ function ChatInterface({ conversationId, setConversationId }) {
       setMessages([])
       setConversationId(null)
       setError(null)
+      setProgress(null)
     } catch (err) {
       console.error('Error clearing conversation:', err)
       setError('Failed to clear conversation')
@@ -100,12 +182,40 @@ function ChatInterface({ conversationId, setConversationId }) {
         >
           🗑️ Clear Chat
         </button>
+
+        {/* NEW - Multi-Agent Toggle */}
+        <div className="multi-agent-toggle">
+          <label>
+            <input
+              type="checkbox"
+              checked={useMultiAgent}
+              onChange={(e) => setUseMultiAgent(e.target.checked)}
+              disabled={isLoading}
+            />
+            <span className="toggle-label">
+              🤖 Multi-Agent Mode
+              {useMultiAgent && <span className="badge">Iterative</span>}
+            </span>
+          </label>
+          {useMultiAgent && (
+            <small className="toggle-hint">
+              Code generation with automatic testing & fixing
+            </small>
+          )}
+        </div>
       </div>
 
       {error && (
         <div className="error-message">
           ⚠️ {error}
           <button onClick={() => setError(null)} className="btn-close">×</button>
+        </div>
+      )}
+
+      {/* NEW - Progress indicator */}
+      {progress && (
+        <div className="progress-bar">
+          <div className="progress-message">{progress}</div>
         </div>
       )}
 
@@ -117,7 +227,11 @@ function ChatInterface({ conversationId, setConversationId }) {
           type="text"
           value={inputMessage}
           onChange={(e) => setInputMessage(e.target.value)}
-          placeholder="Type your message here..."
+          placeholder={
+            useMultiAgent 
+              ? "Describe code to generate (e.g., 'Write Python fibonacci')..."
+              : "Type your message here..."
+          }
           className="chat-input"
           disabled={isLoading}
           autoFocus
@@ -130,6 +244,11 @@ function ChatInterface({ conversationId, setConversationId }) {
           {isLoading ? '⏳' : '📤'} Send
         </button>
       </form>
+
+      {/* Mode indicator */}
+      <div className="mode-indicator">
+        {useMultiAgent ? '🤖 Multi-Agent Mode' : '💬 Chat Mode'}
+      </div>
     </div>
   )
 }
