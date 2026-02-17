@@ -251,3 +251,49 @@ async def multi_agent_health():
         "conversational": True,  # ✅ NEW
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
+    
+    
+@router.websocket("/stream")
+async def code_generation_stream(websocket: WebSocket):
+    await websocket.accept()
+    
+    try:
+        data = await websocket.receive_json()
+        message = data.get("message", "")
+        conversation_id = data.get("conversation_id")
+        user_id = data.get("user_id", "web_user")  # NEW
+        
+        # NEW: Load conversation history for context
+        history = memory_manager.get_conversation_history(
+            conversation_id, limit=10
+        )
+        
+        # NEW: Get user preferences
+        user_prefs = memory_manager.get_user_preferences(user_id)
+        
+        # Send greeting with personalization
+        if user_prefs.get('coding', {}).get('preferred_language'):
+            lang = user_prefs['coding']['preferred_language']['value']
+            await websocket.send_json({
+                "type": "greeting",
+                "message": f"👋 Hello! I see you prefer {lang}. Ready to code!"
+            })
+        
+        # Process with memory
+        result = await orchestrator.process(
+            user_message=message,
+            conversation_id=conversation_id,
+            user_id=user_id,  # NEW: Pass user_id
+            conversation_history=history,  # NEW: Pass history
+            message_callback=send_to_frontend
+        )
+        
+        # Send complete
+        await websocket.send_json({
+            "type": "complete",
+            "success": result.get("success"),
+            "result": result
+        })
+        
+    except WebSocketDisconnect:
+        logger.info("WebSocket disconnected")
