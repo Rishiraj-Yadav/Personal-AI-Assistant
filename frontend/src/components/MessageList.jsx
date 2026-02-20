@@ -64,45 +64,44 @@ function MessageList({ messages, isLoading }) {
 
   return (
     <div className="message-list">
-      {messages.length === 0 && !isLoading && (
-        <div className="welcome-message">
-          <h2>👋 Welcome to OpenClaw Multi-Agent!</h2>
-          <p>I'm your AI assistant with <strong>multi-agent capabilities</strong>.</p>
-          
-          <div className="mode-cards">
-            <div className="mode-card">
-              <h3>💬 Chat Mode</h3>
-              <p>Regular conversations and tasks</p>
-              <ul>
-                <li>Desktop automation</li>
-                <li>Web scraping</li>
-                <li>General questions</li>
-              </ul>
-            </div>
-            
-            <div className="mode-card highlight">
-              <h3>🤖 Multi-Agent Mode</h3>
-              <p>Advanced code generation</p>
-              <ul>
-                <li>✅ Iterative testing (up to 5 times)</li>
-                <li>✅ Automatic error fixing</li>
-                <li>✅ Saves working code to files</li>
-                <li>✅ Google Gemini Pro</li>
-              </ul>
-            </div>
-          </div>
+      // Update the welcome message section:
 
-          <div className="example-prompts">
-            <p><strong>Try asking:</strong></p>
-            <ul>
-              <li><strong>Chat:</strong> "Help me plan my day"</li>
-              <li><strong>Chat:</strong> "Open Task Manager"</li>
-              <li><strong>Multi-Agent:</strong> "Write Python fibonacci"</li>
-              <li><strong>Multi-Agent:</strong> "Create Flask API with auth"</li>
-            </ul>
-          </div>
-        </div>
-      )}
+{messages.length === 0 && !isLoading && (
+  <div className="welcome-message">
+    <h2>👋 Welcome to OpenClaw Smart Agent!</h2>
+    <p>I automatically detect what you need - just ask naturally!</p>
+    
+    <div className="feature-cards">
+      <div className="feature-card">
+        <h3>🤖 Smart Detection</h3>
+        <p>No buttons, no modes - I figure out what you want</p>
+      </div>
+      
+      <div className="feature-card">
+        <h3>🧠 Learns Your Style</h3>
+        <p>Remembers your preferences over time</p>
+      </div>
+      
+      <div className="feature-card">
+        <h3>💻 Full Context</h3>
+        <p>Knows our conversation history</p>
+      </div>
+    </div>
+
+    <div className="example-prompts">
+      <p><strong>Just ask naturally:</strong></p>
+      <ul>
+        <li>"create a react todo app" → Detects: Coding</li>
+        <li>"open Chrome" → Detects: Desktop control</li>
+        <li>"scrape example.com" → Detects: Web scraping</li>
+        <li>"explain quantum physics" → Detects: General chat</li>
+      </ul>
+      <p className="smart-note">
+        ✨ I learn from each interaction to serve you better!
+      </p>
+    </div>
+  </div>
+)}
 
       {messages.map((message, index) => (
         <div key={index} className={`message message-${message.role}`}>

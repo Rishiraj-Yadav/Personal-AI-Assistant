@@ -1,6 +1,5 @@
 """
-Multi-Agent API Routes - WITH CONVERSATIONAL WEBSOCKET
-Real-time conversational updates like VS Code Copilot
+Multi-Agent API Routes - WITH CONVERSATION HISTORY ENDPOINT
 """
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
@@ -8,10 +7,10 @@ from typing import Optional, Dict, Any, List
 from loguru import logger
 import asyncio
 import json
-from datetime import datetime,timezone
+from datetime import datetime, timezone
 
-# Import multi-agent orchestrator
 from app.agents.multi_agent_orchestrator import orchestrator
+from app.services.memory_service import memory_service  # ✅ NEW
 
 router = APIRouter()
 
@@ -31,22 +30,18 @@ class MultiAgentResponse(BaseModel):
     confidence: float
     response: str
     
-    # Single file (legacy)
     code: Optional[str] = None
     file_path: Optional[str] = None
     
-    # Multi-file (NEW)
     files: Optional[Dict[str, str]] = None
     project_structure: Optional[Dict] = None
     main_file: Optional[str] = None
     project_type: Optional[str] = None
     
-    # Server info (NEW)
     server_running: Optional[bool] = False
     server_url: Optional[str] = None
     server_port: Optional[int] = None
     
-    # Metadata
     language: Optional[str] = None
     metadata: Dict[str, Any]
     error: Optional[str] = None
@@ -55,44 +50,29 @@ class MultiAgentResponse(BaseModel):
 
 @router.post("/generate", response_model=MultiAgentResponse)
 async def generate_code(request: MultiAgentRequest):
-    """
-    Generate code using multi-agent system with iteration
-    
-    This endpoint:
-    1. Routes task to appropriate agent (Router Agent)
-    2. Generates code if coding task (Code Specialist)
-    3. Tests in E2B sandbox iteratively
-    4. Fixes errors automatically (up to max_iterations)
-    5. Returns working code + file
-    """
+    """Generate code using multi-agent system with iteration"""
     try:
         logger.info(f"🚀 Multi-agent request: {request.message[:50]}...")
         
-        # Process through multi-agent system (without callback)
         result = await orchestrator.process(
             user_message=request.message,
             conversation_id=request.conversation_id
         )
         
-        # Format response
-       # Add new fields to response
         response = MultiAgentResponse(
             success=result.get("success", False),
             task_type=result.get("task_type", "unknown"),
             confidence=result.get("confidence", 0.0),
             response=result.get("output", ""),
             
-            # Legacy single file
             code=result.get("code"),
             file_path=result.get("file_path"),
             
-            # Multi-file (NEW)
             files=result.get("files"),
             project_structure=result.get("project_structure"),
             main_file=result.get("main_file"),
             project_type=result.get("project_type"),
             
-            # Server info (NEW)
             server_running=result.get("server_running", False),
             server_url=result.get("server_url"),
             server_port=result.get("server_port"),
@@ -112,51 +92,19 @@ async def generate_code(request: MultiAgentRequest):
 
 @router.websocket("/stream")
 async def code_generation_stream(websocket: WebSocket):
-    """
-    WebSocket endpoint for CONVERSATIONAL real-time code generation
-    
-    Like VS Code Copilot / Cursor AI:
-    - Greets user
-    - Explains what it's doing
-    - Shows progress updates
-    - Explains errors
-    - Celebrates success
-    
-    Example (JavaScript):
-        const ws = new WebSocket('ws://localhost:8000/api/v1/multi-agent/stream');
-        ws.send(JSON.stringify({
-            message: "create a flask app",
-            max_iterations: 5
-        }));
-        
-        ws.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-            console.log(data.type, data.message);
-            // Types: greeting, thinking, analysis, iteration, testing, success, error, complete
-        };
-    """
+    """Smart WebSocket with memory"""
     await websocket.accept()
     
     try:
-        # Receive initial message
         data = await websocket.receive_json()
         message = data.get("message", "")
+        user_id = data.get("user_id", "anonymous")
         conversation_id = data.get("conversation_id")
         max_iterations = data.get("max_iterations", 5)
         
-        logger.info(f"🔌 WebSocket: {message[:50]}...")
+        logger.info(f"🔌 WebSocket from {user_id}: {message[:50]}...")
         
-        # Create callback function to send messages to frontend
         async def send_to_frontend(msg_data: Dict[str, Any]):
-            """
-            Send conversational message to frontend
-            
-            msg_data format:
-            {
-                "type": "greeting" | "thinking" | "iteration" | "success" | etc,
-                "message": "The actual message text"
-            }
-            """
             try:
                 await websocket.send_json({
                     "type": msg_data.get("type", "status"),
@@ -164,26 +112,22 @@ async def code_generation_stream(websocket: WebSocket):
                     "timestamp": datetime.now(timezone.utc).isoformat()
                 })
             except Exception as e:
-                logger.warning(f"⚠️ Failed to send message: {e}")
+                logger.warning(f"⚠️ Send failed: {e}")
         
-        # Send initial router classification message
         await websocket.send_json({
             "type": "router",
             "message": "🎯 Analyzing your request...",
             "timestamp": datetime.now(timezone.utc).isoformat()
         })
         
-        await asyncio.sleep(0.3)
-        
-        # Process through orchestrator WITH CALLBACK
         result = await orchestrator.process(
             user_message=message,
+            user_id=user_id,
             conversation_id=conversation_id,
             max_iterations=max_iterations,
-            message_callback=send_to_frontend  # ✅ ENABLE CONVERSATION
+            message_callback=send_to_frontend
         )
         
-        # Send classification result
         await websocket.send_json({
             "type": "classification",
             "task_type": result.get("task_type"),
@@ -192,17 +136,21 @@ async def code_generation_stream(websocket: WebSocket):
             "timestamp": datetime.now(timezone.utc).isoformat()
         })
         
-        await asyncio.sleep(0.3)
-        
-        # Send final result
         await websocket.send_json({
             "type": "complete",
             "success": result.get("success"),
             "result": {
                 "task_type": result.get("task_type"),
                 "response": result.get("output"),
+                "conversation_id": conversation_id,  # ✅ Include conversation ID
                 "code": result.get("code"),
+                "files": result.get("files"),
                 "file_path": result.get("file_path"),
+                "project_structure": result.get("project_structure"),
+                "main_file": result.get("main_file"),
+                "server_running": result.get("server_running"),
+                "server_url": result.get("server_url"),
+                "language": result.get("language"),
                 "metadata": result.get("metadata"),
                 "agent_path": result.get("agent_path")
             },
@@ -212,7 +160,7 @@ async def code_generation_stream(websocket: WebSocket):
     except WebSocketDisconnect:
         logger.info("🔌 WebSocket disconnected")
     except Exception as e:
-        logger.error(f"❌ WebSocket error: {str(e)}")
+        logger.error(f"❌ WebSocket error: {e}")
         try:
             await websocket.send_json({
                 "type": "error",
@@ -223,13 +171,56 @@ async def code_generation_stream(websocket: WebSocket):
             pass
 
 
+# ✅ NEW: Conversation history endpoint
+@router.get("/conversation/{conversation_id}")
+async def get_conversation_history(conversation_id: str):
+    """
+    Get conversation history from database
+    
+    Returns messages in format ready for frontend display
+    """
+    try:
+        logger.info(f"📖 Loading conversation: {conversation_id}")
+        
+        # Get messages from memory service
+        messages = memory_service.get_conversation_history(
+            conversation_id, limit=100
+        )
+        
+        if not messages:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"Conversation {conversation_id} not found"
+            )
+        
+        # Convert to frontend format
+        frontend_messages = []
+        for msg in messages:
+            frontend_messages.append({
+                'role': msg['role'],
+                'content': msg['content'],
+                'timestamp': msg['timestamp'],
+                'metadata': msg.get('metadata', {})
+            })
+        
+        logger.info(f"✅ Loaded {len(frontend_messages)} messages")
+        
+        return {
+            "conversation_id": conversation_id,
+            "message_count": len(frontend_messages),
+            "messages": frontend_messages
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error loading conversation: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/health")
 async def multi_agent_health():
-    """
-    Health check for multi-agent system
-    
-    Returns status of all agents
-    """
+    """Health check for multi-agent system"""
     return {
         "status": "healthy",
         "service": "multi-agent",
@@ -244,56 +235,13 @@ async def multi_agent_health():
             "Iterative code generation",
             "Automatic error fixing",
             "E2B sandbox execution",
-            "Real-time conversational updates",  # ✅ NEW
-            "JavaScript support",  # ✅ NEW
-            "Project structure detection"
+            "Real-time conversational updates",
+            "JavaScript support",
+            "Project structure detection",
+            "Persistent memory",  # ✅ NEW
+            "Conversation history"  # ✅ NEW
         ],
-        "conversational": True,  # ✅ NEW
+        "conversational": True,
+        "memory_enabled": True,  # ✅ NEW
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
-    
-    
-@router.websocket("/stream")
-async def code_generation_stream(websocket: WebSocket):
-    await websocket.accept()
-    
-    try:
-        data = await websocket.receive_json()
-        message = data.get("message", "")
-        conversation_id = data.get("conversation_id")
-        user_id = data.get("user_id", "web_user")  # NEW
-        
-        # NEW: Load conversation history for context
-        history = memory_manager.get_conversation_history(
-            conversation_id, limit=10
-        )
-        
-        # NEW: Get user preferences
-        user_prefs = memory_manager.get_user_preferences(user_id)
-        
-        # Send greeting with personalization
-        if user_prefs.get('coding', {}).get('preferred_language'):
-            lang = user_prefs['coding']['preferred_language']['value']
-            await websocket.send_json({
-                "type": "greeting",
-                "message": f"👋 Hello! I see you prefer {lang}. Ready to code!"
-            })
-        
-        # Process with memory
-        result = await orchestrator.process(
-            user_message=message,
-            conversation_id=conversation_id,
-            user_id=user_id,  # NEW: Pass user_id
-            conversation_history=history,  # NEW: Pass history
-            message_callback=send_to_frontend
-        )
-        
-        # Send complete
-        await websocket.send_json({
-            "type": "complete",
-            "success": result.get("success"),
-            "result": result
-        })
-        
-    except WebSocketDisconnect:
-        logger.info("WebSocket disconnected")

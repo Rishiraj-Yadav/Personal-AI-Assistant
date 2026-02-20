@@ -29,7 +29,10 @@ aiofiles==23.2.1
 
 
 
+sqlalchemy>=2.0.0
+psycopg2-binary
 
+aiohttp==3.9.1  # ← ADD THIS LINE
 
 
 

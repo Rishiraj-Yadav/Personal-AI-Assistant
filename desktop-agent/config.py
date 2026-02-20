@@ -16,7 +16,7 @@ class DesktopAgentSettings(BaseSettings):
     API_KEY: str = secrets.token_urlsafe(32)  # Auto-generated secret
     
     # Safety settings
-    SAFE_MODE: bool = False  # True = log only, don't execute
+    SAFE_MODE: bool = True  # True = log only, don't execute
     # SAFE_MODE: bool = True  # True = log only, don't execute
     REQUIRE_CONFIRMATION: bool = True  # Ask before dangerous actions
     LOG_ALL_ACTIONS: bool = True

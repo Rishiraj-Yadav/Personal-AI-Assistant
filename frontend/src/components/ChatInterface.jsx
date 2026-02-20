@@ -1,16 +1,27 @@
 import { useState, useRef, useEffect } from 'react'
 import axios from 'axios'
 import MessageList from './MessageList'
+import { getUserId, getUserName, setUserName, hasUserName } from '../utils/userId'
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1'
 
-function ChatInterface({ conversationId, setConversationId }) {
+// ✅ NEW: Conversation ID persistence
+const CONVERSATION_ID_KEY = 'openclaw_conversation_id';
+
+function ChatInterface() {
   const [messages, setMessages] = useState([])
   const [inputMessage, setInputMessage] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState(null)
-  const [useMultiAgent, setUseMultiAgent] = useState(false)  // NEW - Toggle for multi-agent
-  const [progress, setProgress] = useState(null)  // NEW - Progress updates
+  const [progress, setProgress] = useState(null)
+  const [userId] = useState(getUserId())
+  const [showNamePrompt, setShowNamePrompt] = useState(!hasUserName())
+  
+  // ✅ FIX: Load conversation ID from localStorage
+  const [conversationId, setConversationId] = useState(() => {
+    return localStorage.getItem(CONVERSATION_ID_KEY) || null
+  })
+  
   const messagesEndRef = useRef(null)
 
   const scrollToBottom = () => {
@@ -20,6 +31,45 @@ function ChatInterface({ conversationId, setConversationId }) {
   useEffect(() => {
     scrollToBottom()
   }, [messages, progress])
+
+  // ✅ NEW: Load conversation history on mount
+  useEffect(() => {
+    if (conversationId) {
+      loadConversationHistory(conversationId)
+    }
+  }, [])
+
+  // ✅ NEW: Save conversation ID to localStorage whenever it changes
+  useEffect(() => {
+    if (conversationId) {
+      localStorage.setItem(CONVERSATION_ID_KEY, conversationId)
+    }
+  }, [conversationId])
+
+  // ✅ NEW: Load conversation history from backend
+  const loadConversationHistory = async (convId) => {
+    try {
+      const response = await axios.get(`${API_BASE_URL}/multi-agent/conversation/${convId}`)
+      if (response.data && response.data.messages) {
+        setMessages(response.data.messages)
+        console.log(`✅ Loaded ${response.data.messages.length} messages from conversation ${convId}`)
+      }
+    } catch (err) {
+      console.warn('Could not load conversation history:', err)
+      // If conversation not found, clear the stored ID
+      if (err.response?.status === 404) {
+        localStorage.removeItem(CONVERSATION_ID_KEY)
+        setConversationId(null)
+      }
+    }
+  }
+
+  const handleSetName = (name) => {
+    if (name.trim()) {
+      setUserName(name.trim())
+      setShowNamePrompt(false)
+    }
+  }
 
   const sendMessage = async (e) => {
     e.preventDefault()
@@ -32,7 +82,6 @@ function ChatInterface({ conversationId, setConversationId }) {
       timestamp: new Date().toISOString()
     }
 
-    // Add user message immediately
     setMessages(prev => [...prev, userMessage])
     setInputMessage('')
     setIsLoading(true)
@@ -40,21 +89,8 @@ function ChatInterface({ conversationId, setConversationId }) {
     setProgress(null)
 
     try {
-      let response
+      const response = await sendWithSmartAgent(inputMessage)
 
-      if (useMultiAgent) {
-        // Use multi-agent endpoint for code generation
-        response = await sendWithMultiAgent(inputMessage)
-      } else {
-        // Use regular chat endpoint
-        response = await axios.post(`${API_BASE_URL}/chat`, {
-          message: inputMessage,
-          conversation_id: conversationId,
-          user_id: 'web_user'
-        })
-      }
-
-      // Add assistant response
       const assistantMessage = {
         role: 'assistant',
         content: response.data.response,
@@ -62,28 +98,30 @@ function ChatInterface({ conversationId, setConversationId }) {
         metadata: {
           model: response.data.model_used,
           tokens: response.data.tokens_used,
-          skills_used: response.data.skills_used || [],
-          // Multi-agent specific
           task_type: response.data.task_type,
           agent_path: response.data.agent_path,
           iterations: response.data.metadata?.total_iterations,
           code: response.data.code,
-          file_path: response.data.file_path
+          files: response.data.files,
+          file_path: response.data.file_path,
+          project_structure: response.data.project_structure,
+          main_file: response.data.main_file,
+          server_running: response.data.server_running,
+          server_url: response.data.server_url,
+          language: response.data.language
         }
       }
 
       setMessages(prev => [...prev, assistantMessage])
       
-      // Update conversation ID if it's a new conversation
-      if (!conversationId) {
+      // ✅ FIX: Save conversation ID if it's new
+      if (!conversationId && response.data.conversation_id) {
         setConversationId(response.data.conversation_id)
       }
 
     } catch (err) {
       console.error('Error sending message:', err)
       setError(err.response?.data?.detail || 'Failed to send message. Please try again.')
-      
-      // Remove the user message if request failed
       setMessages(prev => prev.slice(0, -1))
     } finally {
       setIsLoading(false)
@@ -91,8 +129,7 @@ function ChatInterface({ conversationId, setConversationId }) {
     }
   }
 
-  const sendWithMultiAgent = async (message) => {
-    // Use WebSocket for real-time updates
+  const sendWithSmartAgent = async (message) => {
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(`ws://localhost:8000/api/v1/multi-agent/stream`)
       let finalResult = null
@@ -100,7 +137,8 @@ function ChatInterface({ conversationId, setConversationId }) {
       ws.onopen = () => {
         ws.send(JSON.stringify({
           message: message,
-          conversation_id: conversationId,
+          user_id: userId,
+          conversation_id: conversationId,  // ✅ Uses persistent conversation ID
           max_iterations: 5
         }))
       }
@@ -108,15 +146,18 @@ function ChatInterface({ conversationId, setConversationId }) {
       ws.onmessage = (event) => {
         const data = JSON.parse(event.data)
         
-        // Update progress based on message type
-        if (data.type === 'status') {
-          setProgress(data.message)
+        if (data.type === 'router') {
+          setProgress('🎯 ' + data.message)
         } else if (data.type === 'classification') {
-          setProgress(`📍 ${data.message}`)
+          setProgress(`📍 Detected: ${data.task_type} task`)
+        } else if (data.type === 'generating') {
+          setProgress('🎨 ' + data.message)
         } else if (data.type === 'iteration') {
-          setProgress(`🔄 Iteration ${data.iteration}/${data.total}: ${data.success ? '✅' : '⚠️'} ${data.message}`)
+          setProgress(`🔄 Iteration ${data.iteration}/${data.total}`)
         } else if (data.type === 'fixing') {
-          setProgress(`🔧 ${data.message}`)
+          setProgress('🔧 ' + data.message)
+        } else if (data.type === 'success') {
+          setProgress('✅ ' + data.message)
         } else if (data.type === 'complete') {
           finalResult = data.result
           ws.close()
@@ -133,17 +174,22 @@ function ChatInterface({ conversationId, setConversationId }) {
 
       ws.onclose = () => {
         if (finalResult) {
-          // Format as ChatResponse
           resolve({
             data: {
               response: finalResult.response,
-              conversation_id: conversationId || 'multi_agent_conv',
+              conversation_id: conversationId || finalResult.conversation_id || 'new_conv',
               timestamp: new Date().toISOString(),
-              model_used: 'Multi-Agent (Gemini)',
+              model_used: 'Smart Multi-Agent (Gemini)',
               task_type: finalResult.task_type,
               agent_path: finalResult.agent_path,
               code: finalResult.code,
+              files: finalResult.files,
               file_path: finalResult.file_path,
+              project_structure: finalResult.project_structure,
+              main_file: finalResult.main_file,
+              server_running: finalResult.server_running,
+              server_url: finalResult.server_url,
+              language: finalResult.language,
               metadata: finalResult.metadata
             }
           })
@@ -155,21 +201,53 @@ function ChatInterface({ conversationId, setConversationId }) {
   }
 
   const clearConversation = async () => {
-    if (!conversationId) {
-      setMessages([])
-      return
-    }
+    // ✅ NEW: Clear both messages and conversation ID
+    setMessages([])
+    localStorage.removeItem(CONVERSATION_ID_KEY)
+    setConversationId(null)
+    setError(null)
+    setProgress(null)
+    
+    console.log('🗑️ Conversation cleared - starting fresh')
+  }
 
-    try {
-      await axios.delete(`${API_BASE_URL}/conversation/${conversationId}`)
-      setMessages([])
-      setConversationId(null)
-      setError(null)
-      setProgress(null)
-    } catch (err) {
-      console.error('Error clearing conversation:', err)
-      setError('Failed to clear conversation')
-    }
+  if (showNamePrompt) {
+    return (
+      <div className="name-prompt-modal">
+        <div className="name-prompt-content">
+          <h2>👋 Welcome to OpenClaw!</h2>
+          <p>What should I call you? (Optional)</p>
+          <form onSubmit={(e) => {
+            e.preventDefault()
+            const name = e.target.name.value
+            handleSetName(name || 'User')
+          }}>
+            <input
+              type="text"
+              name="name"
+              placeholder="Your name"
+              autoFocus
+              className="name-input"
+            />
+            <div className="name-buttons">
+              <button type="submit" className="btn-primary">
+                Let's go!
+              </button>
+              <button
+                type="button"
+                onClick={() => handleSetName('User')}
+                className="btn-secondary"
+              >
+                Skip
+              </button>
+            </div>
+          </form>
+          <small className="name-hint">
+            💡 I'll remember your preferences to personalize our interactions
+          </small>
+        </div>
+      </div>
+    )
   }
 
   return (
@@ -180,26 +258,19 @@ function ChatInterface({ conversationId, setConversationId }) {
           className="btn-clear"
           disabled={messages.length === 0}
         >
-          🗑️ Clear Chat
+          🗑️ New Chat
         </button>
 
-        {/* NEW - Multi-Agent Toggle */}
-        <div className="multi-agent-toggle">
-          <label>
-            <input
-              type="checkbox"
-              checked={useMultiAgent}
-              onChange={(e) => setUseMultiAgent(e.target.checked)}
-              disabled={isLoading}
-            />
-            <span className="toggle-label">
-              🤖 Multi-Agent Mode
-              {useMultiAgent && <span className="badge">Iterative</span>}
-            </span>
-          </label>
-          {useMultiAgent && (
-            <small className="toggle-hint">
-              Code generation with automatic testing & fixing
+        <div className="user-info">
+          <span className="user-name">
+            👤 {getUserName() || 'User'}
+          </span>
+          <small className="user-id" title={userId}>
+            ID: {userId.substr(0, 12)}...
+          </small>
+          {conversationId && (
+            <small className="conv-id" title={conversationId}>
+              💬 Active conversation
             </small>
           )}
         </div>
@@ -212,7 +283,6 @@ function ChatInterface({ conversationId, setConversationId }) {
         </div>
       )}
 
-      {/* NEW - Progress indicator */}
       {progress && (
         <div className="progress-bar">
           <div className="progress-message">{progress}</div>
@@ -227,11 +297,7 @@ function ChatInterface({ conversationId, setConversationId }) {
           type="text"
           value={inputMessage}
           onChange={(e) => setInputMessage(e.target.value)}
-          placeholder={
-            useMultiAgent 
-              ? "Describe code to generate (e.g., 'Write Python fibonacci')..."
-              : "Type your message here..."
-          }
+          placeholder="Ask me anything - I'll remember our conversation! 🧠"
           className="chat-input"
           disabled={isLoading}
           autoFocus
@@ -245,9 +311,8 @@ function ChatInterface({ conversationId, setConversationId }) {
         </button>
       </form>
 
-      {/* Mode indicator */}
       <div className="mode-indicator">
-        {useMultiAgent ? '🤖 Multi-Agent Mode' : '💬 Chat Mode'}
+        🤖 Smart Agent with Memory - Remembers your conversations
       </div>
     </div>
   )

@@ -1,5 +1,5 @@
 """
-OpenClaw Agent - Main FastAPI Application
+OpenClaw Agent - Main FastAPI Application - FIXED VERSION
 """
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,6 +11,8 @@ from app.config import settings
 from app.api.routes import router
 from app.utils.logger import setup_logging
 from loguru import logger
+from app.database import init_db
+from app.api.routes import multi_agent
 
 
 @asynccontextmanager
@@ -21,6 +23,10 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info(f"Starting {settings.APP_NAME} v{settings.APP_VERSION}")
     logger.info(f"Using Groq model: {settings.GROQ_MODEL}")
+    
+    # Initialize database
+    init_db()  # ✅ Create tables
+    logger.info("✅ Database initialized")
     
     # Create logs directory if it doesn't exist
     os.makedirs("logs", exist_ok=True)
@@ -53,10 +59,6 @@ app.add_middleware(
 
 # Include API routes
 app.include_router(router, prefix="/api/v1", tags=["agent"])
-
-# backend/app/main.py
-from app.api.routes import multi_agent
-
 app.include_router(multi_agent.router)
 
 

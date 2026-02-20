@@ -1,8 +1,8 @@
 """
-Multi-Agent Orchestrator - FIXED VERSION
-- Passes project_name to sandbox for workspace saving
-- Correct install_command vs start_command separation
-- Proper project_path handling
+Multi-Agent Orchestrator - COMPLETE FIXED VERSION
+- Desktop agent actually works
+- Conversation history loaded and used
+- Memory fully integrated
 """
 
 import os
@@ -12,20 +12,22 @@ from datetime import datetime
 from loguru import logger
 import re
 
-# Add paths for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from .multi_agent_state import AgentState
 from .router_agent import router_agent
 from .code_specialist_agent import code_specialist
 from ..services.sandbox_services import sandbox_service
+from ..services.memory_service import memory_service
+from ..core.llm import llm_adapter
+from ..models import Message, MessageRole
 
 
 class MultiAgentOrchestrator:
-    """Orchestrates multiple specialist agents with MULTI-FILE support"""
+    """Orchestrates multiple specialist agents with FULL memory"""
 
     def __init__(self):
-        logger.info("✅ Multi-Agent Orchestrator initialized")
+        logger.info("✅ Multi-Agent Orchestrator with memory initialized")
 
     # ============================================================
     # ROUTING
@@ -34,20 +36,35 @@ class MultiAgentOrchestrator:
     async def _route_to_agent(
         self,
         state: AgentState,
+        user_id: str,
+        conversation_history: list,
         message_callback: Optional[Callable] = None
     ) -> AgentState:
         task_type = state.get("task_type", "general")
 
         if task_type == "coding":
-            return await self._code_specialist_node(state, message_callback)
+            return await self._code_specialist_node(
+                state, user_id, conversation_history, message_callback
+            )
         elif task_type == "desktop":
-            return self._desktop_specialist_node(state)
+            return await self._desktop_specialist_node(
+                state, user_id, conversation_history, message_callback
+            )
         else:
-            return self._general_assistant_node(state)
+            return await self._general_assistant_node(
+                state, user_id, conversation_history, message_callback
+            )
 
-    def _router_node(self, state: AgentState) -> AgentState:
+    def _router_node(
+        self,
+        state: AgentState,
+        user_context: str = ""
+    ) -> AgentState:
         logger.info("🎯 Router: Classifying task...")
-        decision = router_agent.classify_task(state["user_message"])
+        decision = router_agent.classify_task(
+            state["user_message"],
+            user_context=user_context
+        )
 
         state["task_type"] = decision["task_type"]
         state["confidence"] = decision["confidence"]
@@ -65,6 +82,8 @@ class MultiAgentOrchestrator:
     async def _code_specialist_node(
         self,
         state: AgentState,
+        user_id: str,
+        conversation_history: list,
         message_callback: Optional[Callable] = None
     ) -> AgentState:
         logger.info("💻 Code Specialist: Processing...")
@@ -74,7 +93,6 @@ class MultiAgentOrchestrator:
         max_iterations = state.get("max_iterations", 5)
         final_success = False
 
-        # FIX: Extract project name from user message
         project_name = self._extract_project_name(state["user_message"])
 
         for iteration in range(1, max_iterations + 1):
@@ -90,15 +108,32 @@ class MultiAgentOrchestrator:
                 })
 
             # Generate code
-            gen_result = await self._generate_code(state, message_callback)
+            gen_result = await code_specialist.generate_code(
+                description=state["user_message"],
+                user_id=user_id,
+                conversation_history=conversation_history,
+                iteration=iteration,
+                previous_error=state.get("last_error")
+            )
+            
             if not gen_result.get("success"):
                 state["error_message"] = gen_result.get("error", "Code generation failed")
                 break
 
+            # Update state
+            state["files"] = gen_result["files"]
+            state["project_structure"] = gen_result["structure"]
+            state["main_file"] = gen_result["main_file"]
+            state["project_type"] = gen_result["project_type"]
+            state["language"] = gen_result["language"]
+            state["is_server"] = gen_result["is_server"]
+            state["start_command"] = gen_result["start_command"]
+            state["install_command"] = gen_result.get("install_command")
+            state["server_port"] = gen_result.get("port")
+
             # Execute code
-            exec_result = await self._execute_code(state, project_name)  # FIX: Pass project_name
+            exec_result = await self._execute_code(state, project_name)
             
-            # Store result
             state["execution_results"].append({
                 "iteration": iteration,
                 "success": exec_result.get("success", False),
@@ -107,13 +142,22 @@ class MultiAgentOrchestrator:
                 "timestamp": datetime.now().isoformat()
             })
 
-            # FIX: Save project_path from execution result
             if exec_result.get("project_path"):
                 state["project_path"] = exec_result["project_path"]
 
-            # Check if successful
+            # Check success
             if exec_result.get("success"):
                 final_success = True
+                
+                # Learn from success!
+                if user_id:
+                    memory_service.learn_from_behavior(user_id, {
+                        'task_type': 'coding',
+                        'language': state.get('language'),
+                        'framework': state.get('project_type'),
+                        'project_type': state.get('project_type'),
+                        'success': True
+                    })
                 
                 if message_callback:
                     msg = "✅ Code executed successfully!"
@@ -128,20 +172,21 @@ class MultiAgentOrchestrator:
                     })
                 break
             else:
+                state["last_error"] = exec_result.get("stderr", "Unknown error")
+                
                 if iteration < max_iterations:
                     if message_callback:
                         await message_callback({
                             "type": "fixing",
                             "message": f"⚠️ Error found, attempting fix {iteration+1}...",
-                            "error": exec_result.get("stderr", "Unknown error")
+                            "error": state["last_error"]
                         })
 
-        # Finalize state
+        # Finalize
         state["success"] = final_success
         state["total_iterations"] = iteration
         state["end_time"] = datetime.now().isoformat()
 
-        # Set final output
         if final_success:
             files = state.get("files") or {}
             file_count = len(files)
@@ -161,110 +206,49 @@ class MultiAgentOrchestrator:
             if state.get("error_message"):
                 state["final_output"] += f"\nError: {state['error_message']}"
 
+        # Save task history
+        if user_id:
+            memory_service.save_task(user_id, {
+                'conversation_id': state.get('conversation_id'),
+                'task_type': 'coding',
+                'description': state["user_message"],
+                'agent_used': 'code_specialist',
+                'iterations': iteration,
+                'success': final_success,
+                'language': state.get('language'),
+                'framework': state.get('project_type'),
+                'project_type': state.get('project_type')
+            })
+
         return state
 
     def _extract_project_name(self, user_message: str) -> str:
-        """
-        Extract project name from user message
-        Examples:
-        "create a react todo app" -> "todo-app"
-        "build a flask API" -> "flask-api"
-        "make calculator in python" -> "calculator"
-        """
-        # Convert to lowercase
+        """Extract project name from user message"""
         msg = user_message.lower()
         
-        # Remove common words
         remove_words = ['create', 'build', 'make', 'a', 'an', 'the', 'app', 'application', 'project']
         for word in remove_words:
             msg = msg.replace(f' {word} ', ' ')
             msg = msg.replace(f'{word} ', '')
             msg = msg.replace(f' {word}', '')
         
-        # Clean and get first few words
         words = re.findall(r'\w+', msg)
         
         if words:
-            # Take first 2-3 meaningful words
             name_parts = words[:3]
             project_name = '-'.join(name_parts)
-            return project_name[:30]  # Limit length
+            return project_name[:30]
         
         return "my-project"
 
-    async def _generate_code(
-        self,
-        state: Dict,
-        callback=None
-    ) -> Dict:
-        """Generate code using Code Specialist"""
-        iteration = state["iteration"]
-        description = state["user_message"]
-
-        if callback:
-            if iteration == 1:
-                await callback({
-                    "type": "generating",
-                    "message": "🎨 Generating complete project structure..."
-                })
-            else:
-                await callback({
-                    "type": "fixing",
-                    "message": f"🔧 Fixing errors (iteration {iteration})..."
-                })
-
-        previous_error = None
-        if iteration > 1 and state["execution_results"]:
-            last_result = state["execution_results"][-1]
-            previous_error = last_result.get("stderr", "")
-
-        result = await code_specialist.generate_code(
-            description=description,
-            context=None,
-            iteration=iteration,
-            previous_error=previous_error
-        )
-
-        if not result["success"]:
-            return result
-
-        # Update state with MULTI-FILE support
-        state["files"] = result["files"]
-        state["project_structure"] = result["structure"]
-        state["main_file"] = result["main_file"]
-        state["project_type"] = result["project_type"]
-        state["language"] = result["language"]
-        state["is_server"] = result["is_server"]
-        state["start_command"] = result["start_command"]
-        state["install_command"] = result.get("install_command")  # FIX: Save install command
-        state["server_port"] = result.get("port")
-
-        # Legacy
-        state["generated_code"] = result.get("raw_output", "")
-
-        if callback:
-            file_count = len(result["files"])
-            await callback({
-                "type": "generation_complete",
-                "message": f"✅ Generated {file_count} files for {result['project_type']} project"
-            })
-
-        return result
-
     async def _execute_code(self, state: Dict, project_name: str = "my-project") -> Dict:
-        """
-        Execute code with MULTI-FILE support
-        
-        FIX: Passes project_name for workspace saving
-        FIX: Separates install_command from start_command
-        """
+        """Execute code with MULTI-FILE support"""
         files = state.get("files") or state.get("final_files")
         single_code = state.get("generated_code") or state.get("final_code")
 
         if files:
-            # Multi-file project execution
             project_type = state.get("project_type", "python")
-            install_cmd = state.get("install_command")  # FIX: Use install_command
+            install_cmd = state.get("install_command")
             start_cmd = state.get("start_command")
             port = state.get("server_port")
 
@@ -275,13 +259,12 @@ class MultiAgentOrchestrator:
             result = await sandbox_service.execute_project(
                 files=files,
                 project_type=project_type,
-                project_name=project_name,  # FIX: Pass project name
-                install_command=install_cmd,  # FIX: Separate install command
+                project_name=project_name,
+                install_command=install_cmd,
                 start_command=start_cmd,
                 port=port
             )
 
-            # Update state with server info and project path
             if result.get("server_started"):
                 state["server_running"] = True
                 state["server_url"] = result["server_url"]
@@ -305,40 +288,258 @@ class MultiAgentOrchestrator:
         }
 
     # ============================================================
-    # OTHER SPECIALISTS
+    # DESKTOP SPECIALIST - FIXED!
     # ============================================================
 
-    def _desktop_specialist_node(self, state: AgentState) -> AgentState:
+    async def _desktop_specialist_node(
+        self,
+        state: AgentState,
+        user_id: str,
+        conversation_history: list,
+        message_callback: Optional[Callable] = None
+    ) -> AgentState:
+        """
+        Desktop Specialist - ACTUALLY WORKS NOW!
+        
+        This was previously just a stub that returned immediately.
+        Now it properly processes desktop commands.
+        """
         logger.info("🖥️ Desktop Specialist: Processing...")
         state["agent_path"] += ["desktop_specialist"]
-        state["success"] = True
-        state["final_output"] = "Desktop task (using existing skills)"
-        state["end_time"] = datetime.now().isoformat()
-        return state
+        state["start_time"] = datetime.now().isoformat()
 
-    def _general_assistant_node(self, state: AgentState) -> AgentState:
-        logger.info("💬 General Assistant: Processing...")
-        state["agent_path"] += ["general_assistant"]
-        state["success"] = True
-        state["final_output"] = "General query (using existing LLM)"
-        state["end_time"] = datetime.now().isoformat()
+        try:
+            if message_callback:
+                await message_callback({
+                    "type": "processing",
+                    "message": "🖥️ Processing desktop command..."
+                })
+
+            # Convert conversation history to Message objects for LLM
+            messages = []
+            for msg in conversation_history[-10:]:  # Last 10 messages
+                role = MessageRole.USER if msg['role'] == 'user' else MessageRole.ASSISTANT
+                messages.append(Message(
+                    role=role,
+                    content=msg['content']
+                ))
+
+            # Add current user message
+            messages.append(Message(
+                role=MessageRole.USER,
+                content=state["user_message"]
+            ))
+
+            # Get desktop response from LLM with tool calling
+            from ..skills.manager import skill_manager
+            tools = skill_manager.get_skills_for_llm()
+            
+            # Format tools for Groq
+            formatted_tools = [{"type": "function", "function": t} for t in tools]
+            
+            logger.info(f"🔧 Desktop specialist calling LLM with {len(formatted_tools)} tools")
+            
+            # Call LLM
+            llm_result = await llm_adapter.generate_response(
+                messages,
+                tools=formatted_tools
+            )
+
+            # Check if tools were called
+            if llm_result.get("tool_calls"):
+                logger.info(f"🛠️ Desktop agent executing {len(llm_result['tool_calls'])} tools")
+                
+                # Execute desktop skills
+                from ..skills.executor import skill_executor
+                
+                execution_results = []
+                for tool_call in llm_result["tool_calls"]:
+                    import json
+                    skill_name = tool_call["function"]["name"]
+                    args = json.loads(tool_call["function"]["arguments"])
+                    
+                    logger.info(f"🔧 Executing: {skill_name}")
+                    
+                    result = await skill_executor.execute_skill(
+                        skill_name=skill_name,
+                        parameters=args,
+                        user_id=user_id
+                    )
+                    
+                    execution_results.append({
+                        "skill": skill_name,
+                        "success": result.success,
+                        "output": result.output
+                    })
+
+                # Get final response from LLM explaining what was done
+                summary_messages = messages + [Message(
+                    role=MessageRole.ASSISTANT,
+                    content=f"Executed skills: {', '.join([r['skill'] for r in execution_results])}"
+                )]
+                
+                final_result = await llm_adapter.generate_response(
+                    summary_messages,
+                    tools=None  # No more tool calls
+                )
+                
+                output = final_result["response"]
+                success = all(r["success"] for r in execution_results)
+            else:
+                # LLM responded without tools
+                output = llm_result["response"]
+                success = True
+
+            state["success"] = success
+            state["final_output"] = output
+            state["end_time"] = datetime.now().isoformat()
+
+            if message_callback:
+                await message_callback({
+                    "type": "success",
+                    "message": f"✅ {output}"
+                })
+
+            # Learn from desktop actions
+            if user_id:
+                memory_service.learn_from_behavior(user_id, {
+                    'task_type': 'desktop',
+                    'description': state["user_message"],
+                    'success': success
+                })
+
+        except Exception as e:
+            logger.error(f"❌ Desktop specialist error: {e}")
+            state["success"] = False
+            state["final_output"] = f"Desktop task encountered an error: {str(e)}"
+            state["error_message"] = str(e)
+            state["end_time"] = datetime.now().isoformat()
+
+            if message_callback:
+                await message_callback({
+                    "type": "error",
+                    "message": f"❌ Error: {str(e)}"
+                })
+
         return state
 
     # ============================================================
-    # MAIN PROCESS
+    # GENERAL ASSISTANT - FIXED WITH MEMORY!
+    # ============================================================
+
+    async def _general_assistant_node(
+        self,
+        state: AgentState,
+        user_id: str,
+        conversation_history: list,
+        message_callback: Optional[Callable] = None
+    ) -> AgentState:
+        """
+        General Assistant - NOW WITH CONVERSATION HISTORY!
+        
+        Previously: Ignored conversation history
+        Now: Uses full context for responses
+        """
+        logger.info("💬 General Assistant: Processing...")
+        state["agent_path"] += ["general_assistant"]
+        state["start_time"] = datetime.now().isoformat()
+
+        try:
+            if message_callback:
+                await message_callback({
+                    "type": "processing",
+                    "message": "🤖 Thinking..."
+                })
+
+            # ✅ FIX: Convert conversation history to Message objects
+            messages = []
+            
+            # Add conversation history
+            for msg in conversation_history[-10:]:  # Last 10 messages for context
+                role = MessageRole.USER if msg['role'] == 'user' else MessageRole.ASSISTANT
+                messages.append(Message(
+                    role=role,
+                    content=msg['content']
+                ))
+            
+            # Add current user message
+            messages.append(Message(
+                role=MessageRole.USER,
+                content=state["user_message"]
+            ))
+
+            logger.info(f"🤖 Calling Groq LLM with {len(messages)} messages for general query...")
+            
+            # Call LLM with conversation context
+            result = await llm_adapter.generate_response(messages)
+            
+            state["success"] = True
+            state["final_output"] = result["response"]
+            state["end_time"] = datetime.now().isoformat()
+
+            logger.info("✅ General assistant response generated")
+
+            if message_callback:
+                await message_callback({
+                    "type": "success",
+                    "message": "✅ Response ready"
+                })
+
+        except Exception as e:
+            logger.error(f"❌ General assistant error: {e}")
+            state["success"] = False
+            state["final_output"] = f"I encountered an error: {str(e)}"
+            state["error_message"] = str(e)
+            state["end_time"] = datetime.now().isoformat()
+
+        return state
+
+    # ============================================================
+    # MAIN PROCESS - WITH FULL MEMORY
     # ============================================================
 
     async def process(
         self,
         user_message: str,
+        user_id: str = "anonymous",
         conversation_id: str = None,
         max_iterations: int = 5,
         message_callback: Optional[Callable] = None
     ) -> Dict[str, Any]:
+        """
+        Process with full memory support
+        
+        ✅ Saves user messages
+        ✅ Loads conversation history
+        ✅ Gets user preferences
+        ✅ Injects context into all agents
+        """
 
+        if not conversation_id:
+            conversation_id = f"conv_{datetime.now().timestamp()}"
+        
+        # ✅ Save user message
+        memory_service.save_message(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            role='user',
+            content=user_message
+        )
+        
+        # ✅ Get conversation history for context
+        conversation_history = memory_service.get_conversation_history(
+            conversation_id, limit=10
+        )
+        
+        # ✅ Get user context for router
+        user_context = memory_service.get_personalized_context(
+            user_id, task_type=None
+        )
+        
+        # Initialize state
         initial_state: AgentState = {
             "user_message": user_message,
-            "conversation_id": conversation_id or f"conv_{datetime.now().timestamp()}",
+            "conversation_id": conversation_id,
             "task_type": None,
             "confidence": None,
             "iteration": 1,
@@ -346,45 +547,56 @@ class MultiAgentOrchestrator:
             "execution_results": [],
             "agent_path": [],
             "language": None,
-            "project_path": None,  # FIX: Initialize
+            "project_path": None,
             "start_time": None,
             "end_time": None
         }
-
+        
         logger.info(f"🚀 Processing: '{user_message[:50]}...'")
-
-        state = self._router_node(initial_state)
-        state = await self._route_to_agent(state, message_callback)
-
-        final_success = state.get("success", False)
-
-        # FINAL RESPONSE WITH ALL DATA
+        
+        # Route with user context
+        state = self._router_node(initial_state, user_context=user_context)
+        
+        # Execute appropriate agent WITH CONTEXT
+        state = await self._route_to_agent(
+            state,
+            user_id,
+            conversation_history,
+            message_callback
+        )
+        
+        # ✅ Save assistant response
+        memory_service.save_message(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            role='assistant',
+            content=state.get('final_output', ''),
+            metadata={
+                'task_type': state.get('task_type'),
+                'success': state.get('success'),
+                'iterations': state.get('total_iterations'),
+                'language': state.get('language'),
+                'files': list(state.get('files', {}).keys()) if state.get('files') else None
+            }
+        )
+        
+        # Return result
         return {
-            "success": final_success,
+            "success": state.get("success", False),
             "task_type": state["task_type"],
             "confidence": state["confidence"],
             "output": state.get("final_output", ""),
-
-            # Legacy single file
             "code": state.get("generated_code"),
             "file_path": state.get("file_path"),
-
-            # Multi-file (NEW)
             "files": state.get("files"),
             "project_structure": state.get("project_structure"),
             "main_file": state.get("main_file"),
-
-            # Project info
             "project_type": state.get("project_type"),
             "language": state.get("language"),
-            "project_path": state.get("project_path"),  # FIX: Include project path
-
-            # Server info
+            "project_path": state.get("project_path"),
             "server_running": state.get("server_running", False),
             "server_url": state.get("server_url"),
             "server_port": state.get("server_port"),
-
-            # Metadata
             "metadata": {
                 "total_iterations": state.get("total_iterations", 0),
                 "execution_results": state["execution_results"],
