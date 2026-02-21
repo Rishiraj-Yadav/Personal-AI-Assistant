@@ -1,22 +1,19 @@
 """
-Multi-Agent API Routes - WITH CONVERSATION HISTORY ENDPOINT
+Multi-Agent API Routes - WITH CONVERSATION HISTORY
 """
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
 from loguru import logger
-import asyncio
-import json
 from datetime import datetime, timezone
 
 from app.agents.multi_agent_orchestrator import orchestrator
-from app.services.memory_service import memory_service  # ✅ NEW
+from app.services.memory_service import memory_service
 
 router = APIRouter()
 
 
 class MultiAgentRequest(BaseModel):
-    """Request for multi-agent code generation"""
     message: str
     conversation_id: Optional[str] = None
     user_id: str = "web_user"
@@ -24,24 +21,19 @@ class MultiAgentRequest(BaseModel):
 
 
 class MultiAgentResponse(BaseModel):
-    """Response from multi-agent system"""
     success: bool
     task_type: str
     confidence: float
     response: str
-    
     code: Optional[str] = None
     file_path: Optional[str] = None
-    
     files: Optional[Dict[str, str]] = None
     project_structure: Optional[Dict] = None
     main_file: Optional[str] = None
     project_type: Optional[str] = None
-    
     server_running: Optional[bool] = False
     server_url: Optional[str] = None
     server_port: Optional[int] = None
-    
     language: Optional[str] = None
     metadata: Dict[str, Any]
     error: Optional[str] = None
@@ -50,12 +42,13 @@ class MultiAgentResponse(BaseModel):
 
 @router.post("/generate", response_model=MultiAgentResponse)
 async def generate_code(request: MultiAgentRequest):
-    """Generate code using multi-agent system with iteration"""
+    """Generate code using multi-agent system"""
     try:
         logger.info(f"🚀 Multi-agent request: {request.message[:50]}...")
         
         result = await orchestrator.process(
             user_message=request.message,
+            user_id=request.user_id,
             conversation_id=request.conversation_id
         )
         
@@ -64,19 +57,15 @@ async def generate_code(request: MultiAgentRequest):
             task_type=result.get("task_type", "unknown"),
             confidence=result.get("confidence", 0.0),
             response=result.get("output", ""),
-            
             code=result.get("code"),
             file_path=result.get("file_path"),
-            
             files=result.get("files"),
             project_structure=result.get("project_structure"),
             main_file=result.get("main_file"),
             project_type=result.get("project_type"),
-            
             server_running=result.get("server_running", False),
             server_url=result.get("server_url"),
             server_port=result.get("server_port"),
-            
             language=result.get("language"),
             metadata=result.get("metadata", {}),
             error=result.get("error"),
@@ -92,7 +81,7 @@ async def generate_code(request: MultiAgentRequest):
 
 @router.websocket("/stream")
 async def code_generation_stream(websocket: WebSocket):
-    """Smart WebSocket with memory"""
+    """Smart WebSocket with persistent memory"""
     await websocket.accept()
     
     try:
@@ -142,7 +131,7 @@ async def code_generation_stream(websocket: WebSocket):
             "result": {
                 "task_type": result.get("task_type"),
                 "response": result.get("output"),
-                "conversation_id": conversation_id,  # ✅ Include conversation ID
+                "conversation_id": conversation_id,
                 "code": result.get("code"),
                 "files": result.get("files"),
                 "file_path": result.get("file_path"),
@@ -171,18 +160,17 @@ async def code_generation_stream(websocket: WebSocket):
             pass
 
 
-# ✅ NEW: Conversation history endpoint
+# ✅ NEW: Load conversation history
 @router.get("/conversation/{conversation_id}")
 async def get_conversation_history(conversation_id: str):
     """
-    Get conversation history from database
+    Load previous conversation from database
     
-    Returns messages in format ready for frontend display
+    Frontend calls this on page load to restore chat history
     """
     try:
         logger.info(f"📖 Loading conversation: {conversation_id}")
         
-        # Get messages from memory service
         messages = memory_service.get_conversation_history(
             conversation_id, limit=100
         )
@@ -220,14 +208,14 @@ async def get_conversation_history(conversation_id: str):
 
 @router.get("/health")
 async def multi_agent_health():
-    """Health check for multi-agent system"""
+    """Health check"""
     return {
         "status": "healthy",
         "service": "multi-agent",
         "agents": {
             "router": "Google Gemini Flash",
-            "code_specialist": "Google Gemini Pro (Conversational)",
-            "desktop_specialist": "Existing Skills",
+            "code_specialist": "Google Gemini Pro",
+            "desktop_specialist": "Desktop Skills",
             "general_assistant": "Groq Llama"
         },
         "features": [
@@ -235,13 +223,10 @@ async def multi_agent_health():
             "Iterative code generation",
             "Automatic error fixing",
             "E2B sandbox execution",
-            "Real-time conversational updates",
-            "JavaScript support",
-            "Project structure detection",
-            "Persistent memory",  # ✅ NEW
-            "Conversation history"  # ✅ NEW
+            "Real-time updates",
+            "Persistent memory",  # ✅
+            "Conversation history"  # ✅
         ],
-        "conversational": True,
-        "memory_enabled": True,  # ✅ NEW
+        "memory_enabled": True,
         "timestamp": datetime.now(timezone.utc).isoformat()
     }

@@ -17,6 +17,7 @@ services:
     volumes:
       - ./backend/app:/app/app
       - ./backend/logs:/app/logs
+      - ./backend/data:/app/data
       - ${WORKSPACE_PATH:-./workspace}:/workspace
       - ./desktop-agent/config/api_key.txt:/app/desktop_agent_key.txt:ro
     extra_hosts:

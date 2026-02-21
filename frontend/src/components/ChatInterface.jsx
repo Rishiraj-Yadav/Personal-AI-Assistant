@@ -5,7 +5,7 @@ import { getUserId, getUserName, setUserName, hasUserName } from '../utils/userI
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1'
 
-// ✅ NEW: Conversation ID persistence
+// ✅ Store conversation ID in localStorage
 const CONVERSATION_ID_KEY = 'openclaw_conversation_id';
 
 function ChatInterface() {
@@ -17,7 +17,7 @@ function ChatInterface() {
   const [userId] = useState(getUserId())
   const [showNamePrompt, setShowNamePrompt] = useState(!hasUserName())
   
-  // ✅ FIX: Load conversation ID from localStorage
+  // ✅ Load conversation ID from localStorage on mount
   const [conversationId, setConversationId] = useState(() => {
     return localStorage.getItem(CONVERSATION_ID_KEY) || null
   })
@@ -32,32 +32,33 @@ function ChatInterface() {
     scrollToBottom()
   }, [messages, progress])
 
-  // ✅ NEW: Load conversation history on mount
+  // ✅ Load conversation history when component mounts
   useEffect(() => {
     if (conversationId) {
       loadConversationHistory(conversationId)
     }
   }, [])
 
-  // ✅ NEW: Save conversation ID to localStorage whenever it changes
+  // ✅ Save conversation ID to localStorage whenever it changes
   useEffect(() => {
     if (conversationId) {
       localStorage.setItem(CONVERSATION_ID_KEY, conversationId)
+      console.log('💾 Saved conversation ID:', conversationId)
     }
   }, [conversationId])
 
-  // ✅ NEW: Load conversation history from backend
+  // ✅ Load previous conversation from database
   const loadConversationHistory = async (convId) => {
     try {
       const response = await axios.get(`${API_BASE_URL}/multi-agent/conversation/${convId}`)
       if (response.data && response.data.messages) {
         setMessages(response.data.messages)
-        console.log(`✅ Loaded ${response.data.messages.length} messages from conversation ${convId}`)
+        console.log(`✅ Loaded ${response.data.messages.length} messages from ${convId}`)
       }
     } catch (err) {
       console.warn('Could not load conversation history:', err)
-      // If conversation not found, clear the stored ID
       if (err.response?.status === 404) {
+        // Conversation not found, clear stored ID
         localStorage.removeItem(CONVERSATION_ID_KEY)
         setConversationId(null)
       }
@@ -114,7 +115,7 @@ function ChatInterface() {
 
       setMessages(prev => [...prev, assistantMessage])
       
-      // ✅ FIX: Save conversation ID if it's new
+      // ✅ Save conversation ID if new
       if (!conversationId && response.data.conversation_id) {
         setConversationId(response.data.conversation_id)
       }
@@ -138,7 +139,7 @@ function ChatInterface() {
         ws.send(JSON.stringify({
           message: message,
           user_id: userId,
-          conversation_id: conversationId,  // ✅ Uses persistent conversation ID
+          conversation_id: conversationId,  // ✅ Send existing conversation ID
           max_iterations: 5
         }))
       }
@@ -201,14 +202,14 @@ function ChatInterface() {
   }
 
   const clearConversation = async () => {
-    // ✅ NEW: Clear both messages and conversation ID
+    // ✅ Clear both UI and stored conversation ID
     setMessages([])
     localStorage.removeItem(CONVERSATION_ID_KEY)
     setConversationId(null)
     setError(null)
     setProgress(null)
     
-    console.log('🗑️ Conversation cleared - starting fresh')
+    console.log('🗑️ Started new conversation')
   }
 
   if (showNamePrompt) {
@@ -312,7 +313,7 @@ function ChatInterface() {
       </form>
 
       <div className="mode-indicator">
-        🤖 Smart Agent with Memory - Remembers your conversations
+        🤖 Smart Agent with Memory - Remembers conversations forever
       </div>
     </div>
   )
