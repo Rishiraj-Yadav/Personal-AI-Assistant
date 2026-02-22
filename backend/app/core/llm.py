@@ -1,157 +1,247 @@
 """
-LLM Adapter for Groq API integration
+LLM Adapter for Google Gemini API integration
 """
-from groq import Groq, AsyncGroq
+import os
+import json
 from typing import List, Dict, Optional
 from app.config import settings
 from app.models import Message, MessageRole
 from loguru import logger
+import google.generativeai as genai
 
 
-class GroqLLMAdapter:
-    """Adapter for Groq LLM API"""
-    
+class GeminiLLMAdapter:
+    """Adapter for Google Gemini LLM API with function calling support"""
+
     def __init__(self):
-        """Initialize Groq client"""
-        self.client = AsyncGroq(api_key=settings.GROQ_API_KEY)
-        self.model = settings.GROQ_MODEL
-        self.max_tokens = settings.GROQ_MAX_TOKENS
-        self.temperature = settings.GROQ_TEMPERATURE
-        
-        logger.info(f"Initialized Groq LLM with model: {self.model}")
-    
+        """Initialize Gemini client"""
+        api_key = os.getenv("GOOGLE_API_KEY", "")
+        if not api_key:
+            logger.warning("⚠️ GOOGLE_API_KEY not set — LLM will fail")
+
+        genai.configure(api_key=api_key)
+        self.model_name = getattr(settings, "GEMINI_MODEL", "gemini-2.0-flash")
+        self.max_tokens = getattr(settings, "GEMINI_MAX_TOKENS", 2048)
+        self.temperature = getattr(settings, "GEMINI_TEMPERATURE", 0.7)
+
+        logger.info(f"Initialized Gemini LLM with model: {self.model_name}")
+
     def _format_messages(self, messages: List[Message]) -> List[Dict[str, str]]:
         """
-        Convert Message objects to Groq API format
-        
-        Args:
-            messages: List of Message objects
-            
+        Convert Message objects to a simple list of dicts.
+        Used by agent.py when building the tool-call follow-up conversation.
+
         Returns:
-            List of message dicts for Groq API
+            List of message dicts with 'role' and 'content'
         """
         formatted = []
-        
         for msg in messages:
             formatted.append({
                 "role": msg.role.value,
                 "content": msg.content
             })
-        
         return formatted
-    
+
+    def _build_gemini_tools(self, tools: List[Dict]) -> List:
+        """
+        Convert OpenAI/Groq-style tool definitions to Gemini function declarations.
+
+        Input format (from skill_manager):
+            [{"type": "function", "function": {"name": ..., "description": ..., "parameters": {...}}}]
+
+        Output: list of tool dicts for Gemini
+        """
+        function_declarations = []
+        for tool in tools:
+            func_def = tool.get("function", tool)
+            name = func_def.get("name", "")
+            description = func_def.get("description", "")
+            parameters = func_def.get("parameters", {})
+
+            # Clean up parameters for Gemini (remove unsupported keys)
+            cleaned_params = self._clean_parameters(parameters)
+
+            decl = {
+                "name": name,
+                "description": description,
+            }
+            if cleaned_params and cleaned_params.get("properties"):
+                decl["parameters"] = cleaned_params
+
+            function_declarations.append(decl)
+
+        # Use dict-based tool format for maximum compatibility
+        return [{"function_declarations": function_declarations}]
+
+    def _clean_parameters(self, params: dict) -> dict:
+        """Clean parameter schema to be compatible with Gemini API."""
+        if not params:
+            return {}
+
+        cleaned = {}
+        if "type" in params:
+            cleaned["type"] = params["type"].upper() if params["type"] in ("string", "number", "integer", "boolean", "array", "object") else params["type"]
+        if "description" in params:
+            cleaned["description"] = params["description"]
+        if "properties" in params:
+            cleaned["properties"] = {}
+            for prop_name, prop_val in params["properties"].items():
+                cleaned["properties"][prop_name] = self._clean_parameters(prop_val)
+        if "required" in params:
+            cleaned["required"] = params["required"]
+        if "items" in params:
+            cleaned["items"] = self._clean_parameters(params["items"])
+        if "enum" in params:
+            cleaned["enum"] = params["enum"]
+
+        return cleaned
+
     async def generate_response(
-        self, 
+        self,
         messages: List[Message],
         tools: Optional[List[Dict]] = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None
     ) -> Dict[str, any]:
         """
-        Generate response from Groq LLM
-        
+        Generate response from Gemini LLM
+
         Args:
             messages: Conversation history
             tools: Optional list of function/tool definitions
             temperature: Override default temperature
             max_tokens: Override default max tokens
-            
+
         Returns:
             Dict with response text and metadata (including tool calls if any)
         """
         try:
-            # Format messages for API
-            formatted_messages = self._format_messages(messages)
-            
+            # Separate system prompt from conversation
+            system_instruction = None
+            chat_messages = []
+
+            formatted = self._format_messages(messages)
+
             # Add system prompt if not present
-            if not any(msg["role"] == "system" for msg in formatted_messages):
-                formatted_messages.insert(0, {
-                    "role": "system",
-                    "content": settings.SYSTEM_PROMPT
-                })
-            
-            logger.debug(f"Sending {len(formatted_messages)} messages to Groq")
-            
-            # Prepare API call parameters
-            api_params = {
-                "model": self.model,
-                "messages": formatted_messages,
-                "temperature": temperature or self.temperature,
-                "max_tokens": max_tokens or self.max_tokens,
-                "top_p": 1,
-                "stream": False
-            }
-            
-            # Add tools if provided (function calling)
-            if tools:
-                api_params["tools"] = tools
-                api_params["tool_choice"] = "auto"
-                logger.debug(f"Enabled tool calling with {len(tools)} tools")
-            
-            # Call Groq API
-            response = await self.client.chat.completions.create(**api_params)
-            
-            # Extract response
-            choice = response.choices[0]
-            tokens_used = response.usage.total_tokens if response.usage else None
-            
-            result = {
-                "model": self.model,
-                "tokens_used": tokens_used,
-                "finish_reason": choice.finish_reason
-            }
-            
-            # Check if tool was called
-            if choice.finish_reason == "tool_calls" and choice.message.tool_calls:
-                result["tool_calls"] = []
-                for tool_call in choice.message.tool_calls:
-                    result["tool_calls"].append({
-                        "id": tool_call.id,
-                        "type": tool_call.type,
-                        "function": {
-                            "name": tool_call.function.name,
-                            "arguments": tool_call.function.arguments
-                        }
-                    })
-                result["response"] = choice.message.content or ""
-                logger.info(f"LLM requested {len(result['tool_calls'])} tool calls")
+            if not any(msg["role"] == "system" for msg in formatted):
+                system_instruction = settings.SYSTEM_PROMPT
             else:
-                # Normal text response
-                result["response"] = choice.message.content
-                logger.info(f"Groq response generated: {tokens_used} tokens used")
-            
+                for msg in formatted:
+                    if msg["role"] == "system":
+                        system_instruction = msg["content"]
+                    else:
+                        chat_messages.append(msg)
+
+            if not chat_messages:
+                chat_messages = [m for m in formatted if m["role"] != "system"]
+
+            # Build Gemini contents (convert role names)
+            contents = []
+            for msg in chat_messages:
+                role = "user" if msg["role"] == "user" else "model"
+                contents.append({
+                    "role": role,
+                    "parts": [{"text": msg["content"]}]
+                })
+
+            # Ensure conversation doesn't start with model
+            if contents and contents[0]["role"] == "model":
+                contents.insert(0, {"role": "user", "parts": [{"text": "Hello"}]})
+
+            logger.debug(f"Sending {len(contents)} messages to Gemini")
+
+            # Build model config
+            generation_config = {
+                "temperature": temperature or self.temperature,
+                "max_output_tokens": max_tokens or self.max_tokens,
+            }
+
+            # Create model with system instruction and tools
+            model_kwargs = {
+                "generation_config": generation_config,
+            }
+            if system_instruction:
+                model_kwargs["system_instruction"] = system_instruction
+
+            gemini_tools = None
+            if tools:
+                gemini_tools = self._build_gemini_tools(tools)
+                model_kwargs["tools"] = gemini_tools
+                logger.debug(f"Enabled tool calling with {len(tools)} tools")
+
+            model = genai.GenerativeModel(self.model_name, **model_kwargs)
+
+            # Call Gemini API
+            response = model.generate_content(contents)
+
+            # Parse response
+            result = {
+                "model": self.model_name,
+                "tokens_used": None,  # Gemini doesn't always expose this the same way
+                "finish_reason": "stop"
+            }
+
+            # Try to get token count
+            if hasattr(response, 'usage_metadata') and response.usage_metadata:
+                result["tokens_used"] = getattr(response.usage_metadata, 'total_token_count', None)
+
+            # Check for function calls
+            candidate = response.candidates[0] if response.candidates else None
+            if candidate and candidate.content and candidate.content.parts:
+                tool_calls_found = []
+                text_parts = []
+
+                for i, part in enumerate(candidate.content.parts):
+                    if hasattr(part, 'function_call') and part.function_call:
+                        fc = part.function_call
+                        # Convert Gemini function_call to the format agent.py expects
+                        tool_calls_found.append({
+                            "id": f"call_{i}_{fc.name}",
+                            "type": "function",
+                            "function": {
+                                "name": fc.name,
+                                "arguments": json.dumps(dict(fc.args)) if fc.args else "{}"
+                            }
+                        })
+                    elif hasattr(part, 'text') and part.text:
+                        text_parts.append(part.text)
+
+                if tool_calls_found:
+                    result["tool_calls"] = tool_calls_found
+                    result["response"] = " ".join(text_parts) if text_parts else ""
+                    result["finish_reason"] = "tool_calls"
+                    logger.info(f"LLM requested {len(tool_calls_found)} tool calls")
+                else:
+                    result["response"] = " ".join(text_parts)
+                    logger.info(f"Gemini response generated: {result.get('tokens_used', '?')} tokens used")
+            else:
+                # Fallback
+                try:
+                    result["response"] = response.text
+                except Exception:
+                    result["response"] = "I couldn't generate a response. Please try again."
+
             return result
-            
+
         except Exception as e:
-            logger.error(f"Error calling Groq API: {str(e)}")
+            logger.error(f"Error calling Gemini API: {str(e)}")
             raise
-    
+
     async def check_health(self) -> bool:
         """
-        Check if Groq API is accessible
-        
+        Check if Gemini API is accessible
+
         Returns:
             Boolean indicating API health
         """
         try:
-            # Try a minimal API call
-            test_messages = [{
-                "role": "user",
-                "content": "Hello"
-            }]
-            
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=test_messages,
-                max_tokens=5
-            )
-            
-            return True
-            
+            model = genai.GenerativeModel(self.model_name)
+            response = model.generate_content("Hello")
+            return bool(response.text)
         except Exception as e:
-            logger.error(f"Groq health check failed: {str(e)}")
+            logger.error(f"Gemini health check failed: {str(e)}")
             return False
 
 
 # Global LLM adapter instance
-llm_adapter = GroqLLMAdapter()
+llm_adapter = GeminiLLMAdapter()

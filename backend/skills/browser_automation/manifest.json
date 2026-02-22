@@ -1,0 +1,38 @@
+{
+    "name": "browser_automation",
+    "version": "1.0.0",
+    "author": "openclaw",
+    "description": "Automates web browser tasks using the Browser Agent Taskmaster engine. Send a natural-language goal and the agent will plan, navigate, click, type, and verify in a real browser.",
+    "permissions": [
+        "network.external",
+        "browser.automate"
+    ],
+    "parameters": [
+        {
+            "name": "goal",
+            "type": "string",
+            "description": "The high-level goal to accomplish in the browser (e.g. 'Go to YouTube and search for OpenClaw')",
+            "required": true
+        }
+    ],
+    "execution": {
+        "type": "python_script",
+        "entry_point": "controller.py",
+        "timeout": 300,
+        "memory_limit": "512M",
+        "cpu_limit": 1.0,
+        "environment": {}
+    },
+    "tags": [
+        "browser",
+        "automation",
+        "web",
+        "playwright"
+    ],
+    "examples": [
+        "Go to YouTube and search for 'machine learning tutorials'",
+        "Open Wikipedia and find the page about Python programming",
+        "Navigate to Google Maps and search for restaurants near me"
+    ],
+    "verified": true
+}

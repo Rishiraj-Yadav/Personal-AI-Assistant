@@ -14,11 +14,14 @@ services:
       - DEBUG=${DEBUG:-false}
       # CRITICAL FIX: Tell backend how to reach Desktop Agent on host
       - DESKTOP_AGENT_URL=http://host.docker.internal:7777
+      # Browser Agent on host
+      - BROWSER_AGENT_URL=http://host.docker.internal:4000
     volumes:
       - ./backend/app:/app/app
       - ./backend/logs:/app/logs
       - ${WORKSPACE_PATH:-./workspace}:/workspace
       - ./desktop-agent/config/api_key.txt:/app/desktop_agent_key.txt:ro
+      - ./browser-agent/config/api_key.txt:/app/browser_agent_key.txt:ro
     extra_hosts:
       # CRITICAL FIX: Map host.docker.internal to host machine
       - "host.docker.internal:host-gateway"

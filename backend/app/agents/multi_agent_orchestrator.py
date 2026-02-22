@@ -1,12 +1,15 @@
 """
-Multi-Agent Orchestrator - FIXED VERSION
-- Passes project_name to sandbox for workspace saving
-- Correct install_command vs start_command separation
-- Proper project_path handling
+Assistant Agent (Multi-Agent Orchestrator)
+
+The "Assistant" in the Main Agent → Assistant → Specialist architecture.
+Classifies tasks via RouterAgent, then delegates to the appropriate
+specialist with circuit-breaker timeouts and health checks.
 """
 
 import os
 import sys
+import asyncio
+import requests
 from typing import Dict, Any, Optional, Callable
 from datetime import datetime
 from loguru import logger
@@ -21,11 +24,16 @@ from .code_specialist_agent import code_specialist
 from ..services.sandbox_services import sandbox_service
 
 
-class MultiAgentOrchestrator:
-    """Orchestrates multiple specialist agents with MULTI-FILE support"""
+# Timeout for specialist calls (circuit breaker)
+SPECIALIST_TIMEOUT_SECONDS = 30
+
+
+class AssistantAgent:
+    """Routes tasks to specialist agents with circuit-breaker protection."""
 
     def __init__(self):
-        logger.info("✅ Multi-Agent Orchestrator initialized")
+        self._agent_health_cache: Dict[str, bool] = {}
+        logger.info("✅ Assistant Agent (Orchestrator) initialized")
 
     # ============================================================
     # ROUTING
@@ -38,12 +46,54 @@ class MultiAgentOrchestrator:
     ) -> AgentState:
         task_type = state.get("task_type", "general")
 
-        if task_type == "coding":
-            return await self._code_specialist_node(state, message_callback)
-        elif task_type == "desktop":
-            return self._desktop_specialist_node(state)
-        else:
-            return self._general_assistant_node(state)
+        try:
+            if task_type == "coding":
+                return await asyncio.wait_for(
+                    self._code_specialist_node(state, message_callback),
+                    timeout=SPECIALIST_TIMEOUT_SECONDS * 10  # code gen gets longer timeout
+                )
+            elif task_type == "desktop":
+                # Health check desktop agent
+                if not self._check_agent_health("desktop", os.getenv("DESKTOP_AGENT_URL", "http://localhost:7777")):
+                    state["success"] = False
+                    state["final_output"] = "❌ Desktop Agent is not reachable. Make sure it is running."
+                    state["error_message"] = "Desktop Agent offline"
+                    state["end_time"] = datetime.now().isoformat()
+                    return state
+                return self._desktop_specialist_node(state)
+            elif task_type == "browser":
+                # Health check browser agent
+                if not self._check_agent_health("browser", os.getenv("BROWSER_AGENT_URL", "http://localhost:4000")):
+                    state["success"] = False
+                    state["final_output"] = "❌ Browser Agent is not reachable. Start it with: cd browser-agent && npm run serve"
+                    state["error_message"] = "Browser Agent offline"
+                    state["end_time"] = datetime.now().isoformat()
+                    return state
+                return await asyncio.wait_for(
+                    self._browser_specialist_node(state, message_callback),
+                    timeout=SPECIALIST_TIMEOUT_SECONDS * 10  # browser tasks are long
+                )
+            else:
+                return self._general_assistant_node(state)
+        except asyncio.TimeoutError:
+            logger.error(f"⏳ Specialist '{task_type}' timed out after {SPECIALIST_TIMEOUT_SECONDS}s")
+            state["success"] = False
+            state["final_output"] = f"⏳ The {task_type} agent took too long to respond and was stopped."
+            state["error_message"] = f"Specialist timeout ({task_type})"
+            state["end_time"] = datetime.now().isoformat()
+            return state
+
+    def _check_agent_health(self, agent_name: str, url: str) -> bool:
+        """Ping a specialist agent's /health endpoint before routing."""
+        try:
+            resp = requests.get(f"{url}/health", timeout=3)
+            healthy = resp.status_code == 200
+            if not healthy:
+                logger.warning(f"⚠️ {agent_name} agent health check failed (HTTP {resp.status_code})")
+            return healthy
+        except Exception as e:
+            logger.warning(f"⚠️ {agent_name} agent unreachable: {e}")
+            return False
 
     def _router_node(self, state: AgentState) -> AgentState:
         logger.info("🎯 Router: Classifying task...")
@@ -324,6 +374,67 @@ class MultiAgentOrchestrator:
         state["end_time"] = datetime.now().isoformat()
         return state
 
+    async def _browser_specialist_node(
+        self,
+        state: AgentState,
+        message_callback: Optional[Callable] = None
+    ) -> AgentState:
+        """Browser Specialist: Forwards goals to the Browser Agent HTTP server."""
+        logger.info("🌐 Browser Specialist: Processing...")
+        state["agent_path"] += ["browser_specialist"]
+        state["start_time"] = datetime.now().isoformat()
+
+        if message_callback:
+            await message_callback({
+                "type": "status",
+                "message": "🌐 Sending goal to Browser Agent..."
+            })
+
+        try:
+            # Import the controller dynamically
+            import importlib.util
+            controller_path = os.path.join(
+                os.path.dirname(__file__), '..', '..', '..',
+                'skills', 'browser_automation', 'controller.py'
+            )
+            spec = importlib.util.spec_from_file_location("controller", controller_path)
+            controller = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(controller)
+
+            result = controller.execute_goal(state["user_message"])
+
+            if result.get("error"):
+                state["success"] = False
+                state["final_output"] = f"❌ Browser Agent error: {result['error']}"
+                state["error_message"] = result["error"]
+            else:
+                state["success"] = result.get("success", False)
+                logs = result.get("logs", [])
+                log_summary = "\n".join(
+                    [f"[{l.get('agent', '?')}] {l.get('message', '')}" for l in logs[-10:]]
+                )
+                status = result.get("status", "UNKNOWN")
+                state["final_output"] = (
+                    f"🌐 Browser Agent finished with status: {status}\n"
+                    f"Goal: {result.get('goal', state['user_message'])}\n\n"
+                    f"--- Last logs ---\n{log_summary}"
+                )
+
+                if message_callback:
+                    await message_callback({
+                        "type": "success" if state["success"] else "error",
+                        "message": state["final_output"]
+                    })
+
+        except Exception as e:
+            logger.error(f"❌ Browser Specialist error: {str(e)}")
+            state["success"] = False
+            state["final_output"] = f"❌ Browser Specialist error: {str(e)}"
+            state["error_message"] = str(e)
+
+        state["end_time"] = datetime.now().isoformat()
+        return state
+
     # ============================================================
     # MAIN PROCESS
     # ============================================================
@@ -396,5 +507,5 @@ class MultiAgentOrchestrator:
         }
 
 
-# Global orchestrator instance
-orchestrator = MultiAgentOrchestrator()
+# Global instance — kept as `orchestrator` for backward compatibility
+orchestrator = AssistantAgent()

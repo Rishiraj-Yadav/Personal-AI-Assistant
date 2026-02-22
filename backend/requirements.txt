@@ -11,7 +11,7 @@ requests==2.31.0
 
 # LLM
 groq==0.4.1
-google-generativeai==0.3.2
+google-generativeai>=0.8.0
 
 # E2B
 e2b-code-interpreter>=0.0.10

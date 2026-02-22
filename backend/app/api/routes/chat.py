@@ -115,9 +115,9 @@ async def health_check():
         health_status = await agent.health_check()
         
         return HealthResponse(
-            status="healthy" if health_status["groq_api_status"] == "healthy" else "degraded",
+            status="healthy" if health_status["gemini_api_status"] == "healthy" else "degraded",
             version=settings.APP_VERSION,
-            groq_api_status=health_status["groq_api_status"],
+            gemini_api_status=health_status["gemini_api_status"],
             timestamp=datetime.utcnow()
         )
         
@@ -126,7 +126,7 @@ async def health_check():
         return HealthResponse(
             status="unhealthy",
             version=settings.APP_VERSION,
-            groq_api_status="error",
+            gemini_api_status="error",
             timestamp=datetime.utcnow()
         )
 

@@ -50,12 +50,15 @@ Categories:
    
 3. WEB - User wants to scrape websites, check weather, or browse
    Examples: "scrape this website", "what's the weather", "get data from URL"
+
+4. BROWSER - User wants to interact with a website like a human (navigate, click buttons, fill forms, search)
+   Examples: "go to YouTube", "search for flights on Google", "log in to my account", "open Wikipedia"
    
-4. GENERAL - General questions, conversations, or unclear requests
+5. GENERAL - General questions, conversations, or unclear requests
    Examples: "how are you", "what can you do", "explain quantum physics"
 
 Respond in this EXACT format:
-TASK_TYPE: [coding/desktop/web/general]
+TASK_TYPE: [coding/desktop/web/browser/general]
 CONFIDENCE: [0.0-1.0]
 REASONING: [Brief explanation]
 
@@ -107,6 +110,7 @@ Now classify the user request above:"""
             "coding": "code_specialist",
             "desktop": "desktop_specialist",
             "web": "web_specialist",
+            "browser": "browser_specialist",
             "general": "general_assistant"
         }
         return routing_map.get(task_type, "general_assistant")
@@ -157,6 +161,22 @@ Now classify the user request above:"""
                 "confidence": 0.7,
                 "reasoning": "Matched web keywords (fallback)",
                 "next_agent": "web_specialist"
+            }
+        
+        # Browser keywords
+        browser_keywords = [
+            "go to", "navigate", "visit", "open site",
+            "youtube", "google maps", "wikipedia", "search on",
+            "fill form", "log in", "sign in", "click button",
+            "browse to", "open page"
+        ]
+        
+        if any(kw in message_lower for kw in browser_keywords):
+            return {
+                "task_type": "browser",
+                "confidence": 0.7,
+                "reasoning": "Matched browser keywords (fallback)",
+                "next_agent": "browser_specialist"
             }
         
         return {

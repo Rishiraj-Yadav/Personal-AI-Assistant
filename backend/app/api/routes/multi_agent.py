@@ -10,8 +10,8 @@ import asyncio
 import json
 from datetime import datetime,timezone
 
-# Import multi-agent orchestrator
-from app.agents.multi_agent_orchestrator import orchestrator
+# Import Main Agent (top-level entry point)
+from app.agents.main_agent import main_agent
 
 router = APIRouter()
 
@@ -68,8 +68,8 @@ async def generate_code(request: MultiAgentRequest):
     try:
         logger.info(f"🚀 Multi-agent request: {request.message[:50]}...")
         
-        # Process through multi-agent system (without callback)
-        result = await orchestrator.process(
+        # Process through Main Agent pipeline (validation included)
+        result = await main_agent.process(
             user_message=request.message,
             conversation_id=request.conversation_id
         )
@@ -175,8 +175,8 @@ async def code_generation_stream(websocket: WebSocket):
         
         await asyncio.sleep(0.3)
         
-        # Process through orchestrator WITH CALLBACK
-        result = await orchestrator.process(
+        # Process through Main Agent pipeline WITH CALLBACK
+        result = await main_agent.process(
             user_message=message,
             conversation_id=conversation_id,
             max_iterations=max_iterations,
@@ -237,6 +237,7 @@ async def multi_agent_health():
             "router": "Google Gemini Flash",
             "code_specialist": "Google Gemini Pro (Conversational)",
             "desktop_specialist": "Existing Skills",
+            "browser_specialist": "Browser Agent (Taskmaster)",
             "general_assistant": "Groq Llama"
         },
         "features": [

@@ -77,7 +77,7 @@ class HealthResponse(BaseModel):
     status: str
     version: str
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    groq_api_status: str = "unknown"
+    gemini_api_status: str = "unknown"
 
 
 class ErrorResponse(BaseModel):

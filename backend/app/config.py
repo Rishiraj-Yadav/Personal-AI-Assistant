@@ -20,11 +20,16 @@ class Settings(BaseSettings):
     # CORS
     CORS_ORIGINS: list = ["http://localhost:3000", "http://localhost:5173"]
     
-    # Groq API
-    GROQ_API_KEY: str
+    # Groq API (optional, kept for backward compatibility)
+    GROQ_API_KEY: str = ""
     GROQ_MODEL: str = "llama-3.3-70b-versatile"
     GROQ_MAX_TOKENS: int = 2048
     GROQ_TEMPERATURE: float = 0.7
+
+    # Gemini API (primary LLM)
+    GEMINI_MODEL: str = "gemini-2.0-flash"
+    GEMINI_MAX_TOKENS: int = 2048
+    GEMINI_TEMPERATURE: float = 0.7
     
     # Agent Settings
     MAX_CONVERSATION_HISTORY: int = 10

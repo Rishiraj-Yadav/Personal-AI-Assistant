@@ -9,9 +9,10 @@ function ChatInterface({ conversationId, setConversationId }) {
   const [inputMessage, setInputMessage] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState(null)
-  const [useMultiAgent, setUseMultiAgent] = useState(false)  // NEW - Toggle for multi-agent
-  const [progress, setProgress] = useState(null)  // NEW - Progress updates
+  const [useMultiAgent, setUseMultiAgent] = useState(false)
+  const [progress, setProgress] = useState(null)
   const messagesEndRef = useRef(null)
+  const inputRef = useRef(null)
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -21,9 +22,12 @@ function ChatInterface({ conversationId, setConversationId }) {
     scrollToBottom()
   }, [messages, progress])
 
+  useEffect(() => {
+    inputRef.current?.focus()
+  }, [])
+
   const sendMessage = async (e) => {
     e.preventDefault()
-    
     if (!inputMessage.trim() || isLoading) return
 
     const userMessage = {
@@ -32,7 +36,6 @@ function ChatInterface({ conversationId, setConversationId }) {
       timestamp: new Date().toISOString()
     }
 
-    // Add user message immediately
     setMessages(prev => [...prev, userMessage])
     setInputMessage('')
     setIsLoading(true)
@@ -43,10 +46,8 @@ function ChatInterface({ conversationId, setConversationId }) {
       let response
 
       if (useMultiAgent) {
-        // Use multi-agent endpoint for code generation
         response = await sendWithMultiAgent(inputMessage)
       } else {
-        // Use regular chat endpoint
         response = await axios.post(`${API_BASE_URL}/chat`, {
           message: inputMessage,
           conversation_id: conversationId,
@@ -54,7 +55,6 @@ function ChatInterface({ conversationId, setConversationId }) {
         })
       }
 
-      // Add assistant response
       const assistantMessage = {
         role: 'assistant',
         content: response.data.response,
@@ -63,7 +63,6 @@ function ChatInterface({ conversationId, setConversationId }) {
           model: response.data.model_used,
           tokens: response.data.tokens_used,
           skills_used: response.data.skills_used || [],
-          // Multi-agent specific
           task_type: response.data.task_type,
           agent_path: response.data.agent_path,
           iterations: response.data.metadata?.total_iterations,
@@ -73,8 +72,7 @@ function ChatInterface({ conversationId, setConversationId }) {
       }
 
       setMessages(prev => [...prev, assistantMessage])
-      
-      // Update conversation ID if it's a new conversation
+
       if (!conversationId) {
         setConversationId(response.data.conversation_id)
       }
@@ -82,17 +80,15 @@ function ChatInterface({ conversationId, setConversationId }) {
     } catch (err) {
       console.error('Error sending message:', err)
       setError(err.response?.data?.detail || 'Failed to send message. Please try again.')
-      
-      // Remove the user message if request failed
       setMessages(prev => prev.slice(0, -1))
     } finally {
       setIsLoading(false)
       setProgress(null)
+      inputRef.current?.focus()
     }
   }
 
   const sendWithMultiAgent = async (message) => {
-    // Use WebSocket for real-time updates
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(`ws://localhost:8000/api/v1/multi-agent/stream`)
       let finalResult = null
@@ -107,33 +103,18 @@ function ChatInterface({ conversationId, setConversationId }) {
 
       ws.onmessage = (event) => {
         const data = JSON.parse(event.data)
-        
-        // Update progress based on message type
-        if (data.type === 'status') {
-          setProgress(data.message)
-        } else if (data.type === 'classification') {
-          setProgress(`📍 ${data.message}`)
-        } else if (data.type === 'iteration') {
-          setProgress(`🔄 Iteration ${data.iteration}/${data.total}: ${data.success ? '✅' : '⚠️'} ${data.message}`)
-        } else if (data.type === 'fixing') {
-          setProgress(`🔧 ${data.message}`)
-        } else if (data.type === 'complete') {
-          finalResult = data.result
-          ws.close()
-        } else if (data.type === 'error') {
-          reject(new Error(data.message))
-          ws.close()
-        }
+        if (data.type === 'status') setProgress(data.message)
+        else if (data.type === 'classification') setProgress(`📍 ${data.message}`)
+        else if (data.type === 'iteration') setProgress(`🔄 Iteration ${data.iteration}/${data.total}`)
+        else if (data.type === 'fixing') setProgress(`🔧 ${data.message}`)
+        else if (data.type === 'complete') { finalResult = data.result; ws.close() }
+        else if (data.type === 'error') { reject(new Error(data.message)); ws.close() }
       }
 
-      ws.onerror = (error) => {
-        reject(error)
-        ws.close()
-      }
+      ws.onerror = (error) => { reject(error); ws.close() }
 
       ws.onclose = () => {
         if (finalResult) {
-          // Format as ChatResponse
           resolve({
             data: {
               response: finalResult.response,
@@ -148,7 +129,7 @@ function ChatInterface({ conversationId, setConversationId }) {
             }
           })
         } else {
-          reject(new Error('WebSocket closed without result'))
+          reject(new Error('Connection closed'))
         }
       }
     })
@@ -159,7 +140,6 @@ function ChatInterface({ conversationId, setConversationId }) {
       setMessages([])
       return
     }
-
     try {
       await axios.delete(`${API_BASE_URL}/conversation/${conversationId}`)
       setMessages([])
@@ -168,22 +148,20 @@ function ChatInterface({ conversationId, setConversationId }) {
       setProgress(null)
     } catch (err) {
       console.error('Error clearing conversation:', err)
-      setError('Failed to clear conversation')
     }
   }
 
   return (
     <div className="chat-interface">
       <div className="chat-controls">
-        <button 
+        <button
           onClick={clearConversation}
           className="btn-clear"
           disabled={messages.length === 0}
         >
-          🗑️ Clear Chat
+          🗑️ Clear
         </button>
 
-        {/* NEW - Multi-Agent Toggle */}
         <div className="multi-agent-toggle">
           <label>
             <input
@@ -193,26 +171,20 @@ function ChatInterface({ conversationId, setConversationId }) {
               disabled={isLoading}
             />
             <span className="toggle-label">
-              🤖 Multi-Agent Mode
-              {useMultiAgent && <span className="badge">Iterative</span>}
+              Multi-Agent
+              {useMultiAgent && <span className="badge">ON</span>}
             </span>
           </label>
-          {useMultiAgent && (
-            <small className="toggle-hint">
-              Code generation with automatic testing & fixing
-            </small>
-          )}
         </div>
       </div>
 
       {error && (
         <div className="error-message">
-          ⚠️ {error}
+          {error}
           <button onClick={() => setError(null)} className="btn-close">×</button>
         </div>
       )}
 
-      {/* NEW - Progress indicator */}
       {progress && (
         <div className="progress-bar">
           <div className="progress-message">{progress}</div>
@@ -224,31 +196,23 @@ function ChatInterface({ conversationId, setConversationId }) {
 
       <form onSubmit={sendMessage} className="chat-input-form">
         <input
+          ref={inputRef}
           type="text"
           value={inputMessage}
           onChange={(e) => setInputMessage(e.target.value)}
-          placeholder={
-            useMultiAgent 
-              ? "Describe code to generate (e.g., 'Write Python fibonacci')..."
-              : "Type your message here..."
-          }
+          placeholder={useMultiAgent ? "Describe code to generate..." : "Message OpenClaw..."}
           className="chat-input"
           disabled={isLoading}
           autoFocus
         />
-        <button 
-          type="submit" 
+        <button
+          type="submit"
           className="btn-send"
           disabled={!inputMessage.trim() || isLoading}
         >
-          {isLoading ? '⏳' : '📤'} Send
+          {isLoading ? '⏳' : '↑'}
         </button>
       </form>
-
-      {/* Mode indicator */}
-      <div className="mode-indicator">
-        {useMultiAgent ? '🤖 Multi-Agent Mode' : '💬 Chat Mode'}
-      </div>
     </div>
   )
 }

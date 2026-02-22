@@ -282,12 +282,12 @@ class AgentOrchestrator:
         Returns:
             Health status dict
         """
-        groq_healthy = await self.llm.check_health()
+        gemini_healthy = await self.llm.check_health()
         state_stats = self.state.get_stats()
         
         return {
             "agent_status": "healthy",
-            "groq_api_status": "healthy" if groq_healthy else "unhealthy",
+            "gemini_api_status": "healthy" if gemini_healthy else "unhealthy",
             "state_manager": state_stats
         }
 
