@@ -1,50 +1,81 @@
-# Core
+# ============================================
+# OpenClaw Agent - CONFLICT-FREE Requirements
+# Python 3.11+
+# ============================================
+
+# Core Web Framework
 fastapi==0.109.0
 uvicorn[standard]==0.27.0
 pydantic==2.5.3
 pydantic-settings==2.1.0
 python-multipart==0.0.6
 
-# HTTP
-httpx==0.27.2
+# HTTP Clients
+# httpx==0.26.0
 requests==2.31.0
+aiohttp==3.9.1
 
-# LLM
-groq==0.4.1
-google-generativeai==0.3.2
-
-# E2B
-e2b-code-interpreter>=0.0.10
-
-# Browser
-playwright==1.42.0
-
-# Utils
-python-dotenv==1.0.0
+# WebSocket
 websockets==12.0
-cachetools==5.3.3
+
+# ============================================
+# LLM Providers
+# ============================================
+groq==0.4.2
+google-generativeai==0.3.2
+openai==1.12.0
+
+# E2B Sandbox
+e2b-code-interpreter==0.0.10
+
+# Browser Automation
+playwright==1.40.0
+
+# ============================================
+# Vector Database & Embeddings
+# ============================================
+qdrant-client==1.7.3
+sentence-transformers==2.3.1
+# torch auto-installed by sentence-transformers
+
+# ============================================
+# LangGraph & Agent Orchestration
+# ✅ FIXED: Updated langchain-core to match langgraph requirement
+# ============================================
+langgraph==0.0.40
+langchain==0.1.20
+langchain-core==0.1.52       # ✅ FIXED: was 0.1.23, now >=0.1.46
+langchain-community==0.0.38
+langsmith==0.1.17
+
+# ============================================
+# Database
+# ============================================
+sqlalchemy==2.0.25
+alembic==1.13.1
+
+# ============================================
+# Utilities
+# ============================================
+python-dotenv==1.0.0
+cachetools==5.3.2
 loguru==0.7.2
 aiofiles==23.2.1
+python-dateutil==2.8.2
 
+# Data Processing
+numpy==1.26.2
+pandas==2.1.4
 
-
-
-sqlalchemy>=2.0.0
-psycopg2-binary
-
-aiohttp==3.9.1  # ← ADD THIS LINE
-
-
-
-
-
-
-
-
-
-
-
-
+# JSON
+orjson>=3.9.14,<4.0.0
+# ============================================
+# Development (Optional - uncomment if needed)
+# ============================================
+# pytest==7.4.3
+# pytest-asyncio==0.21.1
+# black==23.12.0
+# ruff==0.1.9
 
 
 
@@ -52,112 +83,41 @@ aiohttp==3.9.1  # ← ADD THIS LINE
 
 
 
-
-
-
-
-
-
-
-
-# # OpenClaw Backend Requirements - With Multi-Agent System
-
-# # Core Framework
+# # Core
 # fastapi==0.109.0
 # uvicorn[standard]==0.27.0
 # pydantic==2.5.3
 # pydantic-settings==2.1.0
-
-# # ASGI Server
 # python-multipart==0.0.6
 
-# # CORS
-# # python-cors==1.0.0
-
-# # Logging
-# loguru==0.7.2
-
-# # HTTP Clients
-# # httpx==0.27.2
-# # httpx==0.26.0
+# # HTTP
+# httpx==0.27.2
 # requests==2.31.0
 
-# # LLM Providers
-# groq==0.4.1  # Groq (Llama)
-# google-generativeai==0.3.2  # NEW - Google Gemini
+# # LLM
+# groq==0.4.1
+# google-generativeai==0.3.2
 
-# # Multi-Agent Framework
-# langgraph==0.0.20  # NEW - LangGraph for multi-agent orchestration
-# # langchain==0.1.0  # NEW - LangChain core
-# # langchain-core==0.1.10  # NEW - LangChain core utilities
+# # E2B
+# e2b-code-interpreter>=0.0.10
 
-# # E2B Sandbox (Code Execution)
-# # Note: E2B is accessed via HTTP API, no SDK needed
-
-# # Desktop Automation (for Desktop Agent, not backend)
-# # These are NOT needed in backend, only in desktop-agent
-# # pyautogui==0.9.54
-# # mss==9.0.1
-# # pytesseract==0.3.10
-
-# # Utilities
-# python-dotenv==1.0.0
-# websockets==12.0  # For real-time updates
-
-# # Optional but recommended
-# aiofiles==23.2.1  # Async file operations
-
-
+# # Browser
 # playwright==1.42.0
 
-# cachetools==5.3.3
-
-
-# e2b-code-interpreter==0.0.7
-
-
-
-
-
-
-
-# # Core Framework
-# fastapi==0.109.0
-# uvicorn[standard]==0.27.0
+# # Utils
 # python-dotenv==1.0.0
-
-# # LLM Integration
-# groq==0.4.1
-# openai==1.10.0  # For compatibility with Groq SDK
-
-# # Data Models & Validation
-# pydantic==2.5.3
-# pydantic-settings==2.1.0
-
-# # CORS & HTTP
-# python-multipart==0.0.6
-# httpx==0.26.0
-
-# # State Management
-# cachetools==5.3.2
-
-# # Logging & Monitoring
+# websockets==12.0
+# cachetools==5.3.3
 # loguru==0.7.2
-# aiohttp==3.8.5
+# aiofiles==23.2.1
 
-# # Security
-# python-jose[cryptography]==3.3.0
-# passlib[bcrypt]==1.7.4
 
-# # Date/Time
-# python-dateutil==2.8.2
 
-# # Browser Automation
-# playwright==1.41.0
 
-# # Optional: for future database integration
-# # psycopg2-binary==2.9.9
-# # sqlalchemy==2.0.25
+# sqlalchemy>=2.0.0
+# psycopg2-binary
+
+# aiohttp==3.9.1  # ← ADD THIS LINE
 
 
 
@@ -167,36 +127,12 @@ aiohttp==3.9.1  # ← ADD THIS LINE
 
 
 
-# # # Core Framework
-# # fastapi==0.109.0
-# # uvicorn[standard]==0.27.0
-# # python-dotenv==1.0.0
 
-# # # LLM Integration
-# # groq==0.4.1
-# # openai==1.10.0  # For compatibility with Groq SDK
 
-# # # Data Models & Validation
-# # pydantic==2.5.3
-# # pydantic-settings==2.1.0
 
-# # # CORS & HTTP
-# # python-multipart==0.0.6
-# # httpx==0.26.0
 
-# # # State Management
-# # cachetools==5.3.2
 
-# # # Logging & Monitoring
-# # loguru==0.7.2
 
-# # # Security
-# # python-jose[cryptography]==3.3.0
-# # passlib[bcrypt]==1.7.4
 
-# # # Date/Time
-# # python-dateutil==2.8.2
 
-# # # Optional: for future database integration
-# # # psycopg2-binary==2.9.9
-# # # sqlalchemy==2.0.25
+

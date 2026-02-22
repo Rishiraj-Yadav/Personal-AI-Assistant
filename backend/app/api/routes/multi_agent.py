@@ -1,5 +1,5 @@
 """
-Multi-Agent API Routes - WITH CONVERSATION HISTORY
+Multi-Agent API Routes - Enhanced with LangGraph + Memory
 """
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
@@ -7,8 +7,8 @@ from typing import Optional, Dict, Any, List
 from loguru import logger
 from datetime import datetime, timezone
 
-from app.agents.multi_agent_orchestrator import orchestrator
-from app.services.memory_service import memory_service
+from app.agents.langgraph_orchestrator import langgraph_orchestrator
+from app.services.enhanced_memory_service import enhanced_memory_service
 
 router = APIRouter()
 
@@ -17,7 +17,7 @@ class MultiAgentRequest(BaseModel):
     message: str
     conversation_id: Optional[str] = None
     user_id: str = "web_user"
-    max_iterations: Optional[int] = 5
+    max_iterations: Optional[int] = 3
 
 
 class MultiAgentResponse(BaseModel):
@@ -42,14 +42,16 @@ class MultiAgentResponse(BaseModel):
 
 @router.post("/generate", response_model=MultiAgentResponse)
 async def generate_code(request: MultiAgentRequest):
-    """Generate code using multi-agent system"""
+    """Generate code using LangGraph multi-agent system"""
     try:
         logger.info(f"🚀 Multi-agent request: {request.message[:50]}...")
         
-        result = await orchestrator.process(
+        # Process through LangGraph
+        result = await langgraph_orchestrator.process(
             user_message=request.message,
             user_id=request.user_id,
-            conversation_id=request.conversation_id
+            conversation_id=request.conversation_id or f"conv_{datetime.now().timestamp()}",
+            max_iterations=request.max_iterations
         )
         
         response = MultiAgentResponse(
@@ -81,18 +83,19 @@ async def generate_code(request: MultiAgentRequest):
 
 @router.websocket("/stream")
 async def code_generation_stream(websocket: WebSocket):
-    """Smart WebSocket with persistent memory"""
+    """Smart WebSocket with LangGraph + persistent memory"""
     await websocket.accept()
     
     try:
         data = await websocket.receive_json()
         message = data.get("message", "")
         user_id = data.get("user_id", "anonymous")
-        conversation_id = data.get("conversation_id")
-        max_iterations = data.get("max_iterations", 5)
+        conversation_id = data.get("conversation_id") or f"conv_{datetime.now().timestamp()}"
+        max_iterations = data.get("max_iterations", 3)
         
         logger.info(f"🔌 WebSocket from {user_id}: {message[:50]}...")
         
+        # Callback for progress updates
         async def send_to_frontend(msg_data: Dict[str, Any]):
             try:
                 await websocket.send_json({
@@ -103,13 +106,15 @@ async def code_generation_stream(websocket: WebSocket):
             except Exception as e:
                 logger.warning(f"⚠️ Send failed: {e}")
         
+        # Initial message
         await websocket.send_json({
-            "type": "router",
-            "message": "🎯 Analyzing your request...",
+            "type": "context",
+            "message": "🧠 Loading personalized context...",
             "timestamp": datetime.now(timezone.utc).isoformat()
         })
         
-        result = await orchestrator.process(
+        # Process with LangGraph
+        result = await langgraph_orchestrator.process(
             user_message=message,
             user_id=user_id,
             conversation_id=conversation_id,
@@ -117,14 +122,24 @@ async def code_generation_stream(websocket: WebSocket):
             message_callback=send_to_frontend
         )
         
+        # Send classification
         await websocket.send_json({
             "type": "classification",
             "task_type": result.get("task_type"),
             "confidence": result.get("confidence"),
-            "message": f"📍 Identified as: {result.get('task_type')} task",
+            "message": f"📍 Task: {result.get('task_type')}",
             "timestamp": datetime.now(timezone.utc).isoformat()
         })
         
+        # Send agent path
+        if result.get("agent_path"):
+            await websocket.send_json({
+                "type": "agents",
+                "message": f"🤖 Agents: {' → '.join(result['agent_path'])}",
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            })
+        
+        # Send completion
         await websocket.send_json({
             "type": "complete",
             "success": result.get("success"),
@@ -160,18 +175,13 @@ async def code_generation_stream(websocket: WebSocket):
             pass
 
 
-# ✅ NEW: Load conversation history
 @router.get("/conversation/{conversation_id}")
 async def get_conversation_history(conversation_id: str):
-    """
-    Load previous conversation from database
-    
-    Frontend calls this on page load to restore chat history
-    """
+    """Load conversation history from database"""
     try:
         logger.info(f"📖 Loading conversation: {conversation_id}")
         
-        messages = memory_service.get_conversation_history(
+        messages = enhanced_memory_service.get_conversation_history(
             conversation_id, limit=100
         )
         
@@ -206,17 +216,43 @@ async def get_conversation_history(conversation_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/memory/stats/{user_id}")
+async def get_memory_stats(user_id: str):
+    """Get user's memory statistics"""
+    try:
+        from app.services.context_builder import context_builder
+        
+        stats = context_builder.get_memory_summary(user_id)
+        
+        return {
+            "user_id": user_id,
+            "stats": stats,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    
+    except Exception as e:
+        logger.error(f"❌ Error getting memory stats: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/health")
 async def multi_agent_health():
-    """Health check"""
+    """Health check with memory status"""
     return {
         "status": "healthy",
-        "service": "multi-agent",
+        "service": "multi-agent-langgraph",
+        "version": "2.0",
         "agents": {
             "router": "Google Gemini Flash",
             "code_specialist": "Google Gemini Pro",
             "desktop_specialist": "Desktop Skills",
             "general_assistant": "Groq Llama"
+        },
+        "orchestration": "LangGraph StateGraph",
+        "memory": {
+            "sql": "SQLite (structured)",
+            "vector": "Qdrant (semantic)",
+            "context_builder": "Integrated"
         },
         "features": [
             "Task classification",
@@ -224,9 +260,11 @@ async def multi_agent_health():
             "Automatic error fixing",
             "E2B sandbox execution",
             "Real-time updates",
-            "Persistent memory",  # ✅
-            "Conversation history"  # ✅
+            "Persistent SQL memory",
+            "Semantic vector search",
+            "Personalized context",
+            "Reflection loop",
+            "Behavioral learning"
         ],
-        "memory_enabled": True,
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
