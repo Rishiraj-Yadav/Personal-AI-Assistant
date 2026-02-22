@@ -14,13 +14,18 @@ class SkillManager:
     """Manages skill loading, validation, and registry"""
     
     # def __init__(self, skills_directory: str = "skills"):
-    def __init__(self, skills_directory: str = "/app/skills"):
+    def __init__(self, skills_directory: str = None):
         """
         Initialize skill manager
         
         Args:
             skills_directory: Directory containing skill folders
         """
+        if skills_directory is None:
+            docker_dir = "/app/skills"
+            local_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "skills")
+            skills_directory = docker_dir if os.path.exists(docker_dir) else local_dir
+            
         self.skills_directory = Path(skills_directory)
         self.skills: Dict[str, SkillManifest] = {}
         self.skills_path: Dict[str, Path] = {}

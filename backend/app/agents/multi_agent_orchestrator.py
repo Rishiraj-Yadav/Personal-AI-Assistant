@@ -23,6 +23,15 @@ from .router_agent import router_agent
 from .code_specialist_agent import code_specialist
 from ..services.sandbox_services import sandbox_service
 
+# Pipeline orchestration (new)
+try:
+    from .supervisor_agent import supervisor as supervisor_agent
+    PIPELINE_AVAILABLE = True
+    logger.info("✅ Pipeline orchestration available")
+except ImportError as e:
+    PIPELINE_AVAILABLE = False
+    logger.warning(f"⚠️ Pipeline orchestration not available: {e}")
+
 
 # Timeout for specialist calls (circuit breaker)
 SPECIALIST_TIMEOUT_SECONDS = 30
@@ -464,6 +473,25 @@ class AssistantAgent:
 
         logger.info(f"🚀 Processing: '{user_message[:50]}...'")
 
+        # ── NEW: Use Supervisor/Pipeline for compound tasks ──
+        if PIPELINE_AVAILABLE:
+            try:
+                result = await supervisor_agent.process(
+                    user_message=user_message,
+                    conversation_id=conversation_id,
+                    message_callback=message_callback,
+                )
+
+                # If routed to 'general', fall through to old behavior
+                if result.get("task_type") != "general":
+                    return result
+                # else fall through to legacy routing below
+                logger.info("📍 Pipeline returned 'general' — using legacy flow")
+
+            except Exception as e:
+                logger.error(f"Supervisor error, falling back to legacy: {e}")
+
+        # ── Legacy routing (single agent) ──
         state = self._router_node(initial_state)
         state = await self._route_to_agent(state, message_callback)
 

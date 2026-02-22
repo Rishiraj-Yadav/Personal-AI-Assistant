@@ -98,6 +98,61 @@ function MessageList({ messages, isLoading }) {
             {message.content}
           </div>
 
+          {/* Pipeline Steps Display */}
+          {message.metadata?.pipeline_steps && message.metadata.pipeline_steps.length > 0 && (
+            <div className="pipeline-display">
+              <div className="pipeline-header">
+                <span className="pipeline-icon">⚡</span>
+                <span>Pipeline Execution</span>
+                <span className="pipeline-complexity">
+                  {message.metadata.pipeline_complexity || 'compound'}
+                </span>
+              </div>
+              <div className="pipeline-steps">
+                {message.metadata.pipeline_steps.map((step, i) => (
+                  <div key={i} className={`pipeline-step ${step.success ? 'step-success' : 'step-failed'}`}>
+                    <div className="step-status-icon">
+                      {step.success ? '✅' : '❌'}
+                    </div>
+                    <div className="step-details">
+                      <div className="step-header">
+                        <span className="step-number">Step {i + 1}</span>
+                        <span className={`step-agent-badge agent-${step.agent}`}>
+                          {step.agent === 'desktop' ? '🖥️' :
+                            step.agent === 'browser' ? '🌐' :
+                              step.agent === 'coding' ? '💻' : '💬'} {step.agent}
+                        </span>
+                        <span className="step-action">{step.action}</span>
+                      </div>
+                      <div className="step-meta">
+                        {step.duration_ms > 0 && (
+                          <span className="step-duration">{step.duration_ms}ms</span>
+                        )}
+                        {step.attempt > 1 && (
+                          <span className="step-retries">🔄 {step.attempt} attempts</span>
+                        )}
+                        {step.used_fallback && (
+                          <span className="step-fallback">↩️ fallback</span>
+                        )}
+                      </div>
+                      {step.error && (
+                        <div className="step-error">⚠️ {step.error}</div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              {message.metadata.pipeline_duration_ms && (
+                <div className="pipeline-footer">
+                  Total: {message.metadata.pipeline_duration_ms}ms
+                  {message.metadata.pipeline_id && (
+                    <span className="pipeline-id">{message.metadata.pipeline_id}</span>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Multi-file project display */}
           {message.metadata?.files && Object.keys(message.metadata.files).length > 1 && (
             <div className="project-display">

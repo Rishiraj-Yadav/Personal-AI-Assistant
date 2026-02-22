@@ -51,6 +51,10 @@ class MultiAgentResponse(BaseModel):
     metadata: Dict[str, Any]
     error: Optional[str] = None
     agent_path: List[str]
+    
+    # Pipeline (NEW)
+    pipeline_steps: Optional[List[Dict[str, Any]]] = None
+    pipeline_id: Optional[str] = None
 
 
 @router.post("/generate", response_model=MultiAgentResponse)
@@ -100,7 +104,11 @@ async def generate_code(request: MultiAgentRequest):
             language=result.get("language"),
             metadata=result.get("metadata", {}),
             error=result.get("error"),
-            agent_path=result.get("agent_path", [])
+            agent_path=result.get("agent_path", []),
+            
+            # Pipeline
+            pipeline_steps=result.get("pipeline_steps"),
+            pipeline_id=result.get("pipeline_id"),
         )
         
         return response
@@ -204,7 +212,9 @@ async def code_generation_stream(websocket: WebSocket):
                 "code": result.get("code"),
                 "file_path": result.get("file_path"),
                 "metadata": result.get("metadata"),
-                "agent_path": result.get("agent_path")
+                "agent_path": result.get("agent_path"),
+                "pipeline_steps": result.get("pipeline_steps"),
+                "pipeline_id": result.get("pipeline_id"),
             },
             "timestamp": datetime.now(timezone.utc).isoformat()
         })

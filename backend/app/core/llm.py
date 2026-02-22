@@ -3,6 +3,8 @@ LLM Adapter for Google Gemini API integration
 """
 import os
 import json
+import asyncio
+import re
 from typing import List, Dict, Optional
 from app.config import settings
 from app.models import Message, MessageRole
@@ -167,12 +169,16 @@ class GeminiLLMAdapter:
             if tools:
                 gemini_tools = self._build_gemini_tools(tools)
                 model_kwargs["tools"] = gemini_tools
-                logger.debug(f"Enabled tool calling with {len(tools)} tools")
+                # Tell Gemini to use AUTO function calling mode
+                model_kwargs["tool_config"] = {
+                    "function_calling_config": {"mode": "AUTO"}
+                }
+                logger.info(f"Enabled tool calling with {len(tools)} tools (AUTO mode)")
 
             model = genai.GenerativeModel(self.model_name, **model_kwargs)
 
-            # Call Gemini API
-            response = model.generate_content(contents)
+            # Call Gemini API (run in thread to avoid blocking async event loop)
+            response = await asyncio.to_thread(model.generate_content, contents)
 
             # Parse response
             result = {
@@ -221,11 +227,75 @@ class GeminiLLMAdapter:
                 except Exception:
                     result["response"] = "I couldn't generate a response. Please try again."
 
+            # Fallback: if no structured tool_calls, check for text-based tool calls
+            if "tool_calls" not in result and result.get("response"):
+                text_tool_calls = self._parse_text_tool_calls(result["response"])
+                if text_tool_calls:
+                    result["tool_calls"] = text_tool_calls
+                    result["finish_reason"] = "tool_calls"
+                    # Remove tool call text from response
+                    result["response"] = re.sub(
+                        r'```(?:tool_code|python)?\s*\n?.*?```',
+                        '', result["response"], flags=re.DOTALL
+                    ).strip()
+                    logger.info(f"Parsed {len(text_tool_calls)} tool calls from text fallback")
+
             return result
 
         except Exception as e:
             logger.error(f"Error calling Gemini API: {str(e)}")
             raise
+
+    def _parse_text_tool_calls(self, text: str) -> List[Dict]:
+        """
+        Fallback: parse tool calls from text when Gemini outputs them as code blocks.
+        Handles patterns like:
+          ```tool_code
+          desktop_app_launcher(app="chrome")
+          ```
+        or inline: desktop_app_launcher(app="chrome")
+        """
+        tool_calls = []
+        
+        # Get all known skill names
+        known_skills = set()
+        try:
+            from app.skills.manager import skill_manager
+            known_skills = set(skill_manager.skills.keys())
+        except Exception:
+            pass
+        
+        if not known_skills:
+            return []
+        
+        # Pattern: skill_name(arg1="val1", arg2="val2")
+        # Build regex from known skill names
+        skill_pattern = '|'.join(re.escape(s) for s in known_skills)
+        pattern = rf'({skill_pattern})\s*\(([^)]*)\)'
+        
+        matches = re.findall(pattern, text)
+        
+        for i, (func_name, args_str) in enumerate(matches):
+            # Parse arguments from function-call-like syntax
+            args = {}
+            if args_str.strip():
+                # Match key="value" or key='value' or key=value patterns
+                arg_pattern = r'(\w+)\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|(\S+))'
+                arg_matches = re.findall(arg_pattern, args_str)
+                for key, val1, val2, val3 in arg_matches:
+                    args[key] = val1 or val2 or val3
+            
+            tool_calls.append({
+                "id": f"text_call_{i}_{func_name}",
+                "type": "function",
+                "function": {
+                    "name": func_name,
+                    "arguments": json.dumps(args)
+                }
+            })
+            logger.info(f"Parsed text tool call: {func_name}({args})")
+        
+        return tool_calls
 
     async def check_health(self) -> bool:
         """
@@ -236,7 +306,7 @@ class GeminiLLMAdapter:
         """
         try:
             model = genai.GenerativeModel(self.model_name)
-            response = model.generate_content("Hello")
+            response = await asyncio.to_thread(model.generate_content, "Hello")
             return bool(response.text)
         except Exception as e:
             logger.error(f"Gemini health check failed: {str(e)}")

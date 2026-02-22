@@ -114,18 +114,33 @@ export class BrowserController {
   private context: any = null;
   private page: any = null;
 
-  async init() {
+  async init(cdpUrl?: string) {
     if (this.browser) return;
     const { chromium } = await import("playwright-core");
-    console.log("Launching Brave browser...");
-    this.browser = await chromium.launch({
-      headless: false,
-      executablePath: "C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe"
-    });
-    this.context = await this.browser.newContext({
-      viewport: { width: 1024, height: 768 } // Recommended Vision dimensions
-    });
-    this.page = await this.context.newPage();
+
+    if (cdpUrl) {
+      console.log(`🔗 Connecting to existing browser via CDP: ${cdpUrl}`);
+      try {
+        this.browser = await chromium.connectOverCDP(cdpUrl);
+        const contexts = this.browser.contexts();
+        this.context = contexts.length > 0 ? contexts[0] : await this.browser.newContext();
+        const pages = this.context.pages();
+        this.page = pages.length > 0 ? pages[0] : await this.context.newPage();
+      } catch (err: any) {
+        console.error(`❌ Failed to connect to CDP at ${cdpUrl}:`, err.message);
+        throw new Error(`CDP Connection failed: ${err.message}`);
+      }
+    } else {
+      console.log("Launching Brave browser...");
+      this.browser = await chromium.launch({
+        headless: false,
+        executablePath: "C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe"
+      });
+      this.context = await this.browser.newContext({
+        viewport: { width: 1024, height: 768 } // Recommended Vision dimensions
+      });
+      this.page = await this.context.newPage();
+    }
   }
 
   async close() {

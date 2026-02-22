@@ -77,7 +77,7 @@ app.get("/health", (_req: Request, res: Response) => {
  * the Taskmaster result plus a full log trail.
  */
 app.post("/execute", verifyApiKey, async (req: Request, res: Response) => {
-  const { goal } = req.body;
+  const { goal, cdp_url } = req.body;
 
   if (!goal || typeof goal !== "string") {
     res.status(400).json({ error: "Missing required field: goal (string)" });
@@ -102,6 +102,7 @@ app.post("/execute", verifyApiKey, async (req: Request, res: Response) => {
   }) as any;
 
   try {
+    await browserController.init(cdp_url);
     const taskmaster = new Taskmaster(`api_task_${Date.now()}`);
     const status = await taskmaster.executeGoal(goal);
 
@@ -114,6 +115,71 @@ app.post("/execute", verifyApiKey, async (req: Request, res: Response) => {
       status,
       goal,
       logs,
+    });
+  } catch (err: any) {
+    console.log = originalLog;
+    console.error = originalError;
+
+    logs.push({ agent: "ERROR", message: err.message, timestamp: new Date().toISOString() });
+
+    res.status(500).json({
+      success: false,
+      status: "ERROR",
+      goal,
+      error: err.message,
+      logs,
+    });
+  }
+});
+
+/**
+ * POST /browse
+ * Body: { goal: string, cdp_url?: string }
+ * Alias for /execute with optional CDP attach support.
+ * Used by the Pipeline Engine for Desktop→Browser handoff.
+ */
+app.post("/browse", verifyApiKey, async (req: Request, res: Response) => {
+  const { goal, cdp_url } = req.body;
+
+  if (!goal || typeof goal !== "string") {
+    res.status(400).json({ error: "Missing required field: goal (string)" });
+    return;
+  }
+
+  if (cdp_url) {
+    console.log(`🔗 CDP handoff: connecting to ${cdp_url}`);
+  }
+
+  const logs: TaskLog[] = [];
+  const originalLog = console.log;
+  const originalError = console.error;
+
+  const capture = (...args: any[]) => {
+    const msg = args.map(String).join(" ");
+    logs.push({ agent: "TASKMASTER", message: msg, timestamp: new Date().toISOString() });
+    originalLog(...args);
+  };
+  console.log = capture as any;
+  console.error = ((...args: any[]) => {
+    const msg = args.map(String).join(" ");
+    logs.push({ agent: "ERROR", message: msg, timestamp: new Date().toISOString() });
+    originalError(...args);
+  }) as any;
+
+  try {
+    await browserController.init(cdp_url);
+    const taskmaster = new Taskmaster(`browse_${Date.now()}`);
+    const status = await taskmaster.executeGoal(goal);
+
+    console.log = originalLog;
+    console.error = originalError;
+
+    res.json({
+      success: status === "SUCCESS",
+      status,
+      goal,
+      logs,
+      cdp_attached: !!cdp_url,
     });
   } catch (err: any) {
     console.log = originalLog;
@@ -153,13 +219,8 @@ async function main() {
   // Save API key for backend to read
   saveApiKey();
 
-  // Initialize browser (headless: false for demo)
-  try {
-    await browserController.init();
-  } catch (err: any) {
-    console.error(chalk.red("Failed to initialize browser:"), err.message);
-    process.exit(1);
-  }
+  // Initialize browser lazy-loaded on first request instead of during startup
+  // catch any config errors without breaking HTTP server
 
   app.listen(PORT, HOST, () => {
     console.log("\n" + "=".repeat(60));

@@ -3,7 +3,7 @@ version: '3.8'
 services:
   backend:
     build: ./backend
-    container_name: openclaw-backend
+    # container_name: openclaw-backend
     ports:
       - "8000:8000"
     environment:
@@ -27,7 +27,7 @@ services:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/api/v1/health')"]
+      test: [ "CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/api/v1/health')" ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -37,7 +37,7 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-    container_name: openclaw-frontend
+    # container_name: openclaw-frontend
     ports:
       - "3000:3000"
     environment:

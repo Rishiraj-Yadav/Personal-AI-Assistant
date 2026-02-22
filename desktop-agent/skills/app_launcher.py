@@ -13,6 +13,10 @@ from config import settings
 class AppLauncherSkill:
     """Launches applications"""
     
+    # Browser apps that should get CDP flags for Browser Agent handoff
+    BROWSER_APPS = {"chrome", "brave", "edge", "firefox"}
+    CDP_PORT = 9222
+    
     def __init__(self):
         """Initialize app launcher"""
         self.system = platform.system()
@@ -44,8 +48,22 @@ class AppLauncherSkill:
             # Normalize app name
             app_lower = app.lower()
             
+            # Check for extra flags (e.g., from pipeline engine)
+            extra_flags = args.get("flags", [])
+            
+            # Auto-inject CDP flags for browser apps
+            is_browser = app_lower in self.BROWSER_APPS
+            if is_browser:
+                cdp_flag = f"--remote-debugging-port={self.CDP_PORT}"
+                if cdp_flag not in extra_flags:
+                    extra_flags.append(cdp_flag)
+                logger.info(f"Browser detected: injecting CDP flag → port {self.CDP_PORT}")
+            
+            # Merge extra flags into app_args
+            all_args = app_args + extra_flags
+            
             # Get command based on OS and app
-            command = self._get_app_command(app_lower, app_args)
+            command = self._get_app_command(app_lower, all_args)
             
             if not command:
                 return {
@@ -63,13 +81,21 @@ class AppLauncherSkill:
                 success = True
                 output = "Application launched in background"
             
-            return {
+            result_data = {
                 "success": success,
                 "action": "launch",
                 "app": app,
                 "command": str(command),
                 "output": output[:200] if output else None
             }
+            
+            # Include CDP info for browser handoff
+            if is_browser and success:
+                result_data["cdp_port"] = self.CDP_PORT
+                result_data["cdp_url"] = f"http://localhost:{self.CDP_PORT}"
+                logger.info(f"Browser CDP handoff ready at port {self.CDP_PORT}")
+            
+            return result_data
         
         except Exception as e:
             logger.error(f"App launch error: {str(e)}")
@@ -111,6 +137,11 @@ class AppLauncherSkill:
                 "Windows": f"start msedge {args_str}",
                 "Darwin": f"open -a 'Microsoft Edge' {args_str}",
                 "Linux": f"microsoft-edge {args_str}"
+            },
+            "brave": {
+                "Windows": f"start brave {args_str}",
+                "Darwin": f"open -a 'Brave Browser' {args_str}",
+                "Linux": f"brave-browser {args_str}"
             },
             
             # Text Editors
