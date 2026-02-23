@@ -1,81 +1,61 @@
 # ============================================
-# OpenClaw Agent - CONFLICT-FREE Requirements
-# Python 3.11+
+# OpenClaw Agent - 2026 compatible / realistic versions
+# Python 3.11
 # ============================================
 
-# Core Web Framework
-fastapi==0.109.0
-uvicorn[standard]==0.27.0
-pydantic==2.5.3
-pydantic-settings==2.1.0
-python-multipart==0.0.6
+# ── Core Web Framework ────────────────────────────────────────────────
+fastapi>=0.109.0,<0.115.0
+uvicorn[standard]>=0.27.0,<0.31.0
+pydantic>=2.5.3,<2.10.0
+pydantic-settings>=2.1.0,<2.6.0
+python-multipart>=0.0.6,<0.1
 
-# HTTP Clients
-# httpx==0.26.0
-requests==2.31.0
-aiohttp==3.9.1
+# ── HTTP & WebSocket clients ──────────────────────────────────────────
+requests>=2.31.0,<2.33.0
+aiohttp>=3.9.1,<3.11.0
+websockets>=12.0,<13.0
 
-# WebSocket
-websockets==12.0
+# ── LLM Providers ─────────────────────────────────────────────────────
+groq>=0.9.0,<0.15.0                     # much cleaner httpx & deps than 0.4.2
+openai>=1.12.0,<2.0.0
+google-generativeai>=0.7.0,<0.9.0       # newer versions are more stable
 
-# ============================================
-# LLM Providers
-# ============================================
-groq==0.4.2
-google-generativeai==0.3.2
-openai==1.12.0
+# ── E2B Sandbox ───────────────────────────────────────────────────────
+e2b-code-interpreter>=1.0.0,<3.0.0      # strongly recommended — 0.0.10 is ancient
 
-# E2B Sandbox
-e2b-code-interpreter==0.0.10
+# ── Browser Automation ────────────────────────────────────────────────
+playwright>=1.40.0,<1.50.0
 
-# Browser Automation
-playwright==1.40.0
+# ── Vector DB & Embeddings ────────────────────────────────────────────
+qdrant-client>=1.7.3,<1.12.0
+sentence-transformers>=2.7.0,<3.3.0     # 3.x series is widely used & stable
 
-# ============================================
-# Vector Database & Embeddings
-# ============================================
-qdrant-client==1.7.3
-sentence-transformers==2.3.1
-# torch auto-installed by sentence-transformers
+# ── LangChain / LangGraph family ──────────────────────────────────────
+langchain>=0.2.0,<0.3.0
+langchain-core>=0.2.0,<0.3.0
+langchain-community>=0.2.0,<0.3.0
+langgraph>=0.2.0,<0.3.0
+langsmith>=0.1.120,<0.3.0               # newer langsmith is much more reliable
 
-# ============================================
-# LangGraph & Agent Orchestration
-# ✅ FIXED: Updated langchain-core to match langgraph requirement
-# ============================================
-langgraph==0.0.40
-langchain==0.1.20
-langchain-core==0.1.52       # ✅ FIXED: was 0.1.23, now >=0.1.46
-langchain-community==0.0.38
-langsmith==0.1.17
+# ── Database ──────────────────────────────────────────────────────────
+sqlalchemy>=2.0.25,<2.1.0
+alembic>=1.13.1,<1.15.0
 
-# ============================================
-# Database
-# ============================================
-sqlalchemy==2.0.25
-alembic==1.13.1
-
-# ============================================
-# Utilities
-# ============================================
-python-dotenv==1.0.0
-cachetools==5.3.2
-loguru==0.7.2
-aiofiles==23.2.1
-python-dateutil==2.8.2
-
-# Data Processing
-numpy==1.26.2
-pandas==2.1.4
-
-# JSON
+# ── Utilities ─────────────────────────────────────────────────────────
+python-dotenv>=1.0.0,<2.0.0
+cachetools>=5.3.2,<6.0.0
+loguru>=0.7.2,<0.8.0
+aiofiles>=23.2.1,<24.0.0
+python-dateutil>=2.8.2,<2.10.0
 orjson>=3.9.14,<4.0.0
-# ============================================
-# Development (Optional - uncomment if needed)
-# ============================================
-# pytest==7.4.3
-# pytest-asyncio==0.21.1
-# black==23.12.0
-# ruff==0.1.9
+
+# ── Data Processing ───────────────────────────────────────────────────
+numpy>=1.26.2,<2.0.0                    # very important — many libs still break on numpy 2
+pandas>=2.1.4,<2.3.0
+
+# Optional / nice to have (often pulled transitively anyway)
+httpx>=0.27.0,<0.28.0                   # helps groq + openai + e2b to agree
+
 
 
 
