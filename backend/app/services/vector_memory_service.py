@@ -1,8 +1,9 @@
 """
 Vector Memory Service - Semantic Search with Qdrant
-Enables context-aware memory retrieval
+FIXED: Lazy loading + retry logic
 """
 import os
+import time
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime, timezone
 from loguru import logger
@@ -19,52 +20,92 @@ from qdrant_client.models import (
 class VectorMemoryService:
     """
     Manages semantic memory storage and retrieval using Qdrant
+    FIXED: Lazy initialization to avoid startup errors
     """
     
     def __init__(self):
-        # Connect to Qdrant
-        qdrant_url = os.getenv("QDRANT_URL", "http://localhost:6333")
-        self.client = QdrantClient(url=qdrant_url)
-        
-        # Initialize embedding model (lightweight, fast)
-        self.embedder = SentenceTransformer('all-MiniLM-L6-v2')
+        # ✅ LAZY INIT: Don't connect immediately
+        self.qdrant_url = os.getenv("QDRANT_URL", "http://localhost:6333")
+        self._client = None
+        self._embedder = None
         self.embedding_dim = 384
         
         # Collection names
         self.MESSAGES_COLLECTION = "user_messages"
         self.INSIGHTS_COLLECTION = "user_insights"
         
-        # Initialize collections
-        self._init_collections()
-        
-        logger.info("✅ Vector Memory Service initialized with Qdrant")
+        logger.info("✅ Vector Memory Service initialized (lazy loading)")
     
-    def _init_collections(self):
+    @property
+    def client(self):
+        """Lazy load Qdrant client with retry"""
+        if self._client is None:
+            self._client = self._connect_with_retry()
+        return self._client
+    
+    @property
+    def embedder(self):
+        """Lazy load embedding model"""
+        if self._embedder is None:
+            logger.info("🔄 Loading sentence-transformers model...")
+            self._embedder = SentenceTransformer('all-MiniLM-L6-v2')
+            logger.info("✅ Embedding model loaded")
+        return self._embedder
+    
+    def _connect_with_retry(self, max_retries=5, delay=2):
+        """Connect to Qdrant with retry logic"""
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"🔄 Connecting to Qdrant at {self.qdrant_url} (attempt {attempt + 1}/{max_retries})")
+                client = QdrantClient(url=self.qdrant_url)
+                
+                # Test connection
+                client.get_collections()
+                
+                # Initialize collections
+                self._init_collections_internal(client)
+                
+                logger.info("✅ Connected to Qdrant successfully")
+                return client
+            
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"⚠️ Qdrant connection failed (attempt {attempt + 1}): {e}")
+                    time.sleep(delay)
+                else:
+                    logger.error(f"❌ Failed to connect to Qdrant after {max_retries} attempts")
+                    raise
+    
+    def _init_collections_internal(self, client):
         """Create Qdrant collections if they don't exist"""
-        collections = self.client.get_collections().collections
-        collection_names = [c.name for c in collections]
-        
-        # Messages collection: stores all user messages with metadata
-        if self.MESSAGES_COLLECTION not in collection_names:
-            self.client.create_collection(
-                collection_name=self.MESSAGES_COLLECTION,
-                vectors_config=VectorParams(
-                    size=self.embedding_dim,
-                    distance=Distance.COSINE
+        try:
+            collections = client.get_collections().collections
+            collection_names = [c.name for c in collections]
+            
+            # Messages collection
+            if self.MESSAGES_COLLECTION not in collection_names:
+                client.create_collection(
+                    collection_name=self.MESSAGES_COLLECTION,
+                    vectors_config=VectorParams(
+                        size=self.embedding_dim,
+                        distance=Distance.COSINE
+                    )
                 )
-            )
-            logger.info(f"✅ Created collection: {self.MESSAGES_COLLECTION}")
-        
-        # Insights collection: stores extracted insights/preferences
-        if self.INSIGHTS_COLLECTION not in collection_names:
-            self.client.create_collection(
-                collection_name=self.INSIGHTS_COLLECTION,
-                vectors_config=VectorParams(
-                    size=self.embedding_dim,
-                    distance=Distance.COSINE
+                logger.info(f"✅ Created collection: {self.MESSAGES_COLLECTION}")
+            
+            # Insights collection
+            if self.INSIGHTS_COLLECTION not in collection_names:
+                client.create_collection(
+                    collection_name=self.INSIGHTS_COLLECTION,
+                    vectors_config=VectorParams(
+                        size=self.embedding_dim,
+                        distance=Distance.COSINE
+                    )
                 )
-            )
-            logger.info(f"✅ Created collection: {self.INSIGHTS_COLLECTION}")
+                logger.info(f"✅ Created collection: {self.INSIGHTS_COLLECTION}")
+        
+        except Exception as e:
+            logger.warning(f"⚠️ Could not initialize collections: {e}")
     
     def embed_text(self, text: str) -> List[float]:
         """Convert text to embedding vector"""
@@ -80,18 +121,8 @@ class VectorMemoryService:
         content: str,
         metadata: Dict = None
     ):
-        """
-        Store message in vector database
-        
-        Args:
-            user_id: User identifier
-            message_id: Unique message ID from SQL database
-            conversation_id: Conversation ID
-            role: 'user' or 'assistant'
-            content: Message content
-            metadata: Additional metadata
-        """
-        # Only store user messages (not assistant responses)
+        """Store message in vector database"""
+        # Only store user messages
         if role != 'user':
             return
         
@@ -131,23 +162,11 @@ class VectorMemoryService:
         content: str,
         metadata: Dict = None
     ):
-        """
-        Store extracted insight (preference, pattern, learned fact)
-        
-        Args:
-            user_id: User identifier
-            insight_type: 'preference', 'pattern', 'correction', 'fact'
-            content: The insight text
-            metadata: Additional data
-        """
+        """Store extracted insight"""
         try:
-            # Generate unique ID
             insight_id = hash(f"{user_id}_{insight_type}_{content}_{datetime.now().timestamp()}")
-            
-            # Generate embedding
             vector = self.embed_text(content)
             
-            # Create point
             point = PointStruct(
                 id=insight_id,
                 vector=vector,
@@ -160,7 +179,6 @@ class VectorMemoryService:
                 }
             )
             
-            # Store in Qdrant
             self.client.upsert(
                 collection_name=self.INSIGHTS_COLLECTION,
                 points=[point]
@@ -178,23 +196,10 @@ class VectorMemoryService:
         limit: int = 5,
         score_threshold: float = 0.7
     ) -> List[Dict]:
-        """
-        Find semantically similar past messages
-        
-        Args:
-            user_id: User identifier
-            query: Search query
-            limit: Maximum results
-            score_threshold: Minimum similarity score
-            
-        Returns:
-            List of similar messages with scores
-        """
+        """Find semantically similar past messages"""
         try:
-            # Generate query embedding
             query_vector = self.embed_text(query)
             
-            # Search with user filter
             results = self.client.search(
                 collection_name=self.MESSAGES_COLLECTION,
                 query_vector=query_vector,
@@ -210,7 +215,6 @@ class VectorMemoryService:
                 score_threshold=score_threshold
             )
             
-            # Format results
             similar_messages = []
             for result in results:
                 similar_messages.append({
@@ -235,23 +239,10 @@ class VectorMemoryService:
         insight_types: List[str] = None,
         limit: int = 3
     ) -> List[Dict]:
-        """
-        Find relevant insights for context
-        
-        Args:
-            user_id: User identifier
-            query: Search query
-            insight_types: Filter by types (preference, pattern, etc.)
-            limit: Maximum results
-            
-        Returns:
-            List of relevant insights
-        """
+        """Find relevant insights"""
         try:
-            # Generate query embedding
             query_vector = self.embed_text(query)
             
-            # Build filter
             filter_conditions = [
                 FieldCondition(
                     key="user_id",
@@ -267,7 +258,6 @@ class VectorMemoryService:
                     )
                 )
             
-            # Search
             results = self.client.search(
                 collection_name=self.INSIGHTS_COLLECTION,
                 query_vector=query_vector,
@@ -275,7 +265,6 @@ class VectorMemoryService:
                 limit=limit
             )
             
-            # Format results
             insights = []
             for result in results:
                 insights.append({
@@ -299,31 +288,18 @@ class VectorMemoryService:
         include_messages: bool = True,
         include_insights: bool = True
     ) -> Dict:
-        """
-        Build comprehensive context for current query
-        
-        Args:
-            user_id: User identifier
-            current_query: User's current message
-            include_messages: Include similar past messages
-            include_insights: Include relevant insights
-            
-        Returns:
-            Dict with semantic context
-        """
+        """Build comprehensive context for current query"""
         context = {
             'query': current_query,
             'similar_messages': [],
             'insights': []
         }
         
-        # Get similar past messages
         if include_messages:
             context['similar_messages'] = self.search_similar_messages(
                 user_id, current_query, limit=3
             )
         
-        # Get relevant insights
         if include_insights:
             context['insights'] = self.search_insights(
                 user_id, current_query, limit=3
@@ -336,22 +312,12 @@ class VectorMemoryService:
         user_id: str,
         conversation_messages: List[Dict]
     ):
-        """
-        Extract insights from conversation and store them
-        
-        This should be called periodically or after important conversations
-        
-        Args:
-            user_id: User identifier
-            conversation_messages: Recent messages from conversation
-        """
-        # Simple insight extraction (can be enhanced with LLM)
+        """Extract insights from conversation"""
         user_messages = [
             msg for msg in conversation_messages 
             if msg.get('role') == 'user'
         ]
         
-        # Look for explicit preferences
         for msg in user_messages:
             content = msg.get('content', '').lower()
             
@@ -379,7 +345,6 @@ class VectorMemoryService:
     def get_stats(self, user_id: str) -> Dict:
         """Get statistics about user's vector memory"""
         try:
-            # Count messages
             message_count = self.client.count(
                 collection_name=self.MESSAGES_COLLECTION,
                 count_filter=Filter(
@@ -392,7 +357,6 @@ class VectorMemoryService:
                 )
             )
             
-            # Count insights
             insight_count = self.client.count(
                 collection_name=self.INSIGHTS_COLLECTION,
                 count_filter=Filter(

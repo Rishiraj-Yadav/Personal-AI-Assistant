@@ -10,8 +10,9 @@ services:
       - E2B_API_KEY=${E2B_API_KEY}
       - GROQ_MODEL=${GROQ_MODEL:-llama-3.3-70b-versatile}
       - DEBUG=${DEBUG:-false}
-      # CRITICAL FIX: Tell backend how to reach Desktop Agent on host
       - DESKTOP_AGENT_URL=http://host.docker.internal:7777
+      # ✅ CRITICAL FIX: Qdrant URL (use service name 'qdrant', NOT 'localhost'!)
+      - QDRANT_URL=http://qdrant:6333
     volumes:
       - ./backend/app:/app/app
       - ./backend/logs:/app/logs
@@ -19,8 +20,12 @@ services:
       - ${WORKSPACE_PATH:-./workspace}:/workspace
       - ./desktop-agent/config/api_key.txt:/app/desktop_agent_key.txt:ro
     extra_hosts:
-      # CRITICAL FIX: Map host.docker.internal to host machine
       - "host.docker.internal:host-gateway"
+    # ✅ FIX: Add backend to same network as Qdrant
+    networks:
+      - openclaw-network
+    depends_on:
+      - qdrant
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/api/v1/health')"]
@@ -43,9 +48,11 @@ services:
     volumes:
       - ./frontend/src:/app/src
       - ./frontend/public:/app/public
+    networks:
+      - openclaw-network
     restart: unless-stopped
 
-  # NEW: Qdrant Vector Database
+  # Qdrant Vector Database
   qdrant:
     image: qdrant/qdrant:v1.7.4
     container_name: openclaw-qdrant
@@ -68,15 +75,6 @@ services:
       retries: 3
       start_period: 40s
 
-
-# Make sure this network exists
 networks:
   openclaw-network:
     driver: bridge
-
-# networks:
-#   default:
-#     name: openclaw-network
-
-
-
