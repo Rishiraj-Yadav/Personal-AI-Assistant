@@ -23,6 +23,7 @@ from skills.keyboard_control import keyboard_control_skill
 from skills.app_launcher import app_launcher_skill
 from skills.window_manager import window_manager_skill
 from skills.screen_reader import screen_reader_skill
+from skills.file_manager import file_manager_skill
 
 
 # Initialize FastAPI
@@ -74,7 +75,8 @@ SKILLS = {
     "keyboard_control": keyboard_control_skill,
     "app_launcher": app_launcher_skill,
     "window_manager": window_manager_skill,
-    "screen_reader": screen_reader_skill
+    "screen_reader": screen_reader_skill,
+    "file_manager": file_manager_skill,
 }
 
 

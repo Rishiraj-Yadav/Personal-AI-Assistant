@@ -1,251 +1,248 @@
 #!/usr/bin/env python3
 """
-File Manager Skill
-Safely manages files in a sandboxed workspace
+File Manager Skill — System-wide file management with security restrictions.
+Can access any path on the user's computer EXCEPT forbidden system directories.
 """
 import os
 import json
 import sys
+import shutil
 from pathlib import Path
 import fnmatch
+from datetime import datetime
 
 
-# Security configuration
-WORKSPACE_ROOT = Path(os.environ.get("WORKSPACE_ROOT", "/workspace"))
-MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
-ALLOWED_EXTENSIONS = {
-    '.txt', '.py', '.js', '.json', '.md', '.html', '.css', 
-    '.yaml', '.yml', '.xml', '.csv', '.log', '.sh', '.sql',
-    '.java', '.cpp', '.c', '.h', '.rs', '.go', '.rb', '.php'
-}
-FORBIDDEN_PATHS = {'.env', 'id_rsa', 'id_dsa', '.ssh', '.aws', 'credentials'}
+# ── Security Configuration ──
+USER_HOME = Path.home()
+FORBIDDEN_DIRS = [
+    Path("C:/Windows"),
+    Path("C:/Program Files"),
+    Path("C:/Program Files (x86)"),
+    Path("C:/$Recycle.Bin"),
+    Path("C:/System Volume Information"),
+    Path("C:/ProgramData"),
+]
+FORBIDDEN_NAMES = {'.env', 'id_rsa', 'id_dsa', '.ssh', '.aws', 'credentials', '.git'}
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
+MAX_LIST_ITEMS = 200
 
 
-def validate_path(path_str: str) -> Path:
-    """
-    Validate and resolve path to prevent directory traversal
+def is_forbidden(path: Path) -> bool:
+    """Check if a path is in a forbidden zone."""
+    resolved = path.resolve()
+    path_str = str(resolved).lower()
     
-    Args:
-        path_str: Relative path from user
-        
-    Returns:
-        Absolute path within workspace
-        
-    Raises:
-        ValueError: If path is invalid or outside workspace
-    """
-    if not path_str:
-        raise ValueError("Path cannot be empty")
+    # Block system directories
+    for forbidden in FORBIDDEN_DIRS:
+        try:
+            resolved.relative_to(forbidden)
+            return True
+        except ValueError:
+            pass
     
-    # Check for forbidden patterns
-    path_lower = path_str.lower()
-    for forbidden in FORBIDDEN_PATHS:
-        if forbidden in path_lower:
-            raise ValueError(f"Access to '{forbidden}' is forbidden")
+    # Block sensitive filenames
+    for part in resolved.parts:
+        if part.lower() in {f.lower() for f in FORBIDDEN_NAMES}:
+            return True
     
-    # Resolve path
-    requested_path = Path(path_str)
-    
-    # Prevent absolute paths
-    if requested_path.is_absolute():
-        raise ValueError("Absolute paths are not allowed")
-    
-    # Resolve relative to workspace
-    full_path = (WORKSPACE_ROOT / requested_path).resolve()
-    
-    # Ensure it's within workspace (prevent ../ traversal)
+    # Block other users' home directories
+    users_dir = Path("C:/Users")
     try:
-        full_path.relative_to(WORKSPACE_ROOT)
+        rel = resolved.relative_to(users_dir)
+        parts = rel.parts
+        if parts and parts[0].lower() != USER_HOME.name.lower():
+            return True
     except ValueError:
-        raise ValueError("Path outside workspace is not allowed")
+        pass
     
-    return full_path
+    return False
 
 
-def validate_extension(path: Path) -> bool:
-    """Check if file extension is allowed"""
-    return path.suffix.lower() in ALLOWED_EXTENSIONS or path.suffix == ''
+def resolve_path(path_str: str) -> Path:
+    """
+    Resolve a user-provided path. Supports:
+    - Absolute paths: C:\\Users\\User\\Documents
+    - Relative paths: resolved relative to user home
+    - ~ expansion: ~/Documents
+    """
+    if not path_str or path_str.strip() == "":
+        return USER_HOME
+    
+    path_str = path_str.strip()
+    
+    # Expand ~ to user home
+    if path_str.startswith("~"):
+        path_str = str(USER_HOME / path_str[2:]) if len(path_str) > 1 else str(USER_HOME)
+    
+    path = Path(path_str)
+    
+    # If relative, resolve from user home
+    if not path.is_absolute():
+        path = USER_HOME / path
+    
+    resolved = path.resolve()
+    
+    if is_forbidden(resolved):
+        raise ValueError(f"Access denied: '{path_str}' is in a restricted location")
+    
+    return resolved
 
 
-def create_file(path: str, content: str) -> dict:
-    """Create a new file with content"""
-    file_path = validate_path(path)
-    
-    if not validate_extension(file_path):
-        raise ValueError(f"File extension {file_path.suffix} not allowed")
-    
-    if file_path.exists():
-        raise ValueError(f"File already exists: {path}")
-    
-    if len(content.encode('utf-8')) > MAX_FILE_SIZE:
-        raise ValueError(f"Content exceeds maximum size of {MAX_FILE_SIZE} bytes")
-    
-    # Create parent directories if needed
-    file_path.parent.mkdir(parents=True, exist_ok=True)
-    
-    # Write file
-    file_path.write_text(content, encoding='utf-8')
-    
-    return {
-        "action": "create",
-        "path": str(file_path.relative_to(WORKSPACE_ROOT)),
-        "size": len(content.encode('utf-8')),
-        "message": f"File created successfully: {path}"
-    }
-
-
-def read_file(path: str) -> dict:
-    """Read file contents"""
-    file_path = validate_path(path)
-    
-    if not file_path.exists():
-        raise ValueError(f"File not found: {path}")
-    
-    if not file_path.is_file():
-        raise ValueError(f"Path is not a file: {path}")
-    
-    if file_path.stat().st_size > MAX_FILE_SIZE:
-        raise ValueError(f"File too large (max {MAX_FILE_SIZE} bytes)")
-    
-    content = file_path.read_text(encoding='utf-8')
-    
-    return {
-        "action": "read",
-        "path": str(file_path.relative_to(WORKSPACE_ROOT)),
-        "content": content,
-        "size": len(content.encode('utf-8')),
-        "lines": len(content.splitlines())
-    }
-
-
-def edit_file(path: str, content: str) -> dict:
-    """Edit/overwrite existing file"""
-    file_path = validate_path(path)
-    
-    if not file_path.exists():
-        raise ValueError(f"File not found: {path}. Use 'create' action for new files.")
-    
-    if not validate_extension(file_path):
-        raise ValueError(f"File extension {file_path.suffix} not allowed")
-    
-    if len(content.encode('utf-8')) > MAX_FILE_SIZE:
-        raise ValueError(f"Content exceeds maximum size of {MAX_FILE_SIZE} bytes")
-    
-    # Backup old size
-    old_size = file_path.stat().st_size
-    
-    # Write new content
-    file_path.write_text(content, encoding='utf-8')
-    
-    return {
-        "action": "edit",
-        "path": str(file_path.relative_to(WORKSPACE_ROOT)),
-        "old_size": old_size,
-        "new_size": len(content.encode('utf-8')),
-        "message": f"File updated successfully: {path}"
-    }
-
-
-def list_files(path: str = ".", pattern: str = "*") -> dict:
-    """List files in directory"""
-    dir_path = validate_path(path) if path != "." else WORKSPACE_ROOT
+def list_files(path: str = "", pattern: str = "*") -> dict:
+    """List files and directories at the given path."""
+    dir_path = resolve_path(path)
     
     if not dir_path.exists():
-        dir_path.mkdir(parents=True, exist_ok=True)
+        raise ValueError(f"Directory not found: {path}")
     
     if not dir_path.is_dir():
-        raise ValueError(f"Path is not a directory: {path}")
+        raise ValueError(f"Not a directory: {path}")
     
     files = []
     directories = []
     
-    for item in dir_path.iterdir():
+    for item in sorted(dir_path.iterdir()):
         try:
-            relative_path = str(item.relative_to(WORKSPACE_ROOT))
+            if is_forbidden(item):
+                continue
             
             if item.is_file():
                 if fnmatch.fnmatch(item.name, pattern):
+                    stat = item.stat()
                     files.append({
                         "name": item.name,
-                        "path": relative_path,
-                        "size": item.stat().st_size,
+                        "path": str(item),
+                        "size": stat.st_size,
+                        "modified": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M"),
                         "extension": item.suffix
                     })
             elif item.is_dir():
                 directories.append({
                     "name": item.name,
-                    "path": relative_path
+                    "path": str(item)
                 })
+            
+            if len(files) + len(directories) >= MAX_LIST_ITEMS:
+                break
         except (PermissionError, OSError):
             continue
     
     return {
         "action": "list",
-        "path": str(dir_path.relative_to(WORKSPACE_ROOT)),
+        "path": str(dir_path),
         "pattern": pattern,
-        "files": sorted(files, key=lambda x: x['name']),
-        "directories": sorted(directories, key=lambda x: x['name']),
+        "files": files,
+        "directories": directories,
         "total_files": len(files),
         "total_directories": len(directories)
     }
 
 
-def move_file(path: str, new_path: str) -> dict:
-    """Move or rename a file"""
-    old_path = validate_path(path)
-    new_path_resolved = validate_path(new_path)
-    
-    if not old_path.exists():
-        raise ValueError(f"Source file not found: {path}")
-    
-    if new_path_resolved.exists():
-        raise ValueError(f"Destination already exists: {new_path}")
-    
-    if not validate_extension(new_path_resolved):
-        raise ValueError(f"Destination extension {new_path_resolved.suffix} not allowed")
-    
-    # Create parent directories if needed
-    new_path_resolved.parent.mkdir(parents=True, exist_ok=True)
-    
-    # Move file
-    old_path.rename(new_path_resolved)
-    
-    return {
-        "action": "move",
-        "old_path": str(old_path.relative_to(WORKSPACE_ROOT)),
-        "new_path": str(new_path_resolved.relative_to(WORKSPACE_ROOT)),
-        "message": f"File moved from {path} to {new_path}"
-    }
-
-
-def delete_file(path: str) -> dict:
-    """Delete a file (requires explicit user confirmation)"""
-    file_path = validate_path(path)
+def read_file(path: str) -> dict:
+    """Read file contents."""
+    file_path = resolve_path(path)
     
     if not file_path.exists():
         raise ValueError(f"File not found: {path}")
     
     if not file_path.is_file():
-        raise ValueError(f"Path is not a file: {path}")
+        raise ValueError(f"Not a file: {path}")
     
-    # Get size before deletion
-    size = file_path.stat().st_size
+    if file_path.stat().st_size > MAX_FILE_SIZE:
+        raise ValueError(f"File too large (max {MAX_FILE_SIZE // 1024 // 1024}MB)")
     
-    # Delete file
-    file_path.unlink()
+    try:
+        content = file_path.read_text(encoding='utf-8')
+    except UnicodeDecodeError:
+        content = f"[Binary file — {file_path.stat().st_size} bytes]"
     
     return {
-        "action": "delete",
-        "path": str(file_path.relative_to(WORKSPACE_ROOT)),
-        "size": size,
-        "message": f"File deleted: {path}",
-        "warning": "This action cannot be undone"
+        "action": "read",
+        "path": str(file_path),
+        "content": content,
+        "size": file_path.stat().st_size,
+        "lines": len(content.splitlines())
     }
 
 
-def search_files(search_term: str, pattern: str = "*", path: str = ".") -> dict:
-    """Search for term in files"""
-    dir_path = validate_path(path) if path != "." else WORKSPACE_ROOT
+def write_file(path: str, content: str) -> dict:
+    """Create or overwrite a file."""
+    file_path = resolve_path(path)
+    
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_path.write_text(content, encoding='utf-8')
+    
+    return {
+        "action": "write",
+        "path": str(file_path),
+        "size": len(content.encode('utf-8')),
+        "message": f"File written successfully: {file_path.name}"
+    }
+
+
+def move_file(path: str, new_path: str) -> dict:
+    """Move or rename a file/directory."""
+    src = resolve_path(path)
+    dst = resolve_path(new_path)
+    
+    if not src.exists():
+        raise ValueError(f"Source not found: {path}")
+    
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(src), str(dst))
+    
+    return {
+        "action": "move",
+        "old_path": str(src),
+        "new_path": str(dst),
+        "message": f"Moved {src.name} → {dst.name}"
+    }
+
+
+def copy_file(path: str, new_path: str) -> dict:
+    """Copy a file or directory."""
+    src = resolve_path(path)
+    dst = resolve_path(new_path)
+    
+    if not src.exists():
+        raise ValueError(f"Source not found: {path}")
+    
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    
+    if src.is_dir():
+        shutil.copytree(str(src), str(dst))
+    else:
+        shutil.copy2(str(src), str(dst))
+    
+    return {
+        "action": "copy",
+        "source": str(src),
+        "destination": str(dst),
+        "message": f"Copied {src.name} → {dst.name}"
+    }
+
+
+def delete_file(path: str) -> dict:
+    """Delete a file or directory."""
+    target = resolve_path(path)
+    
+    if not target.exists():
+        raise ValueError(f"Not found: {path}")
+    
+    name = target.name
+    
+    if target.is_dir():
+        shutil.rmtree(str(target))
+        return {"action": "delete", "path": str(target), "message": f"Directory deleted: {name}"}
+    else:
+        size = target.stat().st_size
+        target.unlink()
+        return {"action": "delete", "path": str(target), "size": size, "message": f"File deleted: {name}"}
+
+
+def search_files(path: str = "", pattern: str = "*", search_term: str = "") -> dict:
+    """Search for files by pattern, optionally containing a search term."""
+    dir_path = resolve_path(path)
     
     if not dir_path.exists() or not dir_path.is_dir():
         raise ValueError(f"Invalid directory: {path}")
@@ -253,114 +250,189 @@ def search_files(search_term: str, pattern: str = "*", path: str = ".") -> dict:
     results = []
     
     for file_path in dir_path.rglob(pattern):
-        if not file_path.is_file():
+        if not file_path.is_file() or is_forbidden(file_path):
             continue
         
-        if file_path.stat().st_size > MAX_FILE_SIZE:
-            continue
+        if search_term:
+            try:
+                if file_path.stat().st_size > MAX_FILE_SIZE:
+                    continue
+                content = file_path.read_text(encoding='utf-8')
+                if search_term.lower() not in content.lower():
+                    continue
+                
+                # Find matching lines
+                matches = []
+                for i, line in enumerate(content.splitlines(), 1):
+                    if search_term.lower() in line.lower():
+                        matches.append({"line": i, "content": line.strip()[:150]})
+                        if len(matches) >= 5:
+                            break
+                
+                results.append({"file": str(file_path), "matches": matches})
+            except (UnicodeDecodeError, PermissionError):
+                continue
+        else:
+            results.append({
+                "file": str(file_path),
+                "size": file_path.stat().st_size,
+                "modified": datetime.fromtimestamp(file_path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+            })
         
-        try:
-            content = file_path.read_text(encoding='utf-8')
-            lines = content.splitlines()
-            
-            matches = []
-            for line_num, line in enumerate(lines, 1):
-                if search_term.lower() in line.lower():
-                    matches.append({
-                        "line": line_num,
-                        "content": line.strip()
-                    })
-            
-            if matches:
-                results.append({
-                    "file": str(file_path.relative_to(WORKSPACE_ROOT)),
-                    "matches": matches[:10]  # Limit to 10 matches per file
-                })
-        
-        except (UnicodeDecodeError, PermissionError):
-            continue
+        if len(results) >= 50:
+            break
     
     return {
         "action": "search",
-        "search_term": search_term,
+        "path": str(dir_path),
         "pattern": pattern,
-        "results": results[:50],  # Limit to 50 files
-        "total_files_matched": len(results)
+        "search_term": search_term or None,
+        "results": results,
+        "total_found": len(results)
     }
 
 
-def main():
-    """Main entry point"""
+def mkdir(path: str) -> dict:
+    """Create a directory (including parents)."""
+    dir_path = resolve_path(path)
+    dir_path.mkdir(parents=True, exist_ok=True)
+    return {"action": "mkdir", "path": str(dir_path), "message": f"Directory created: {dir_path.name}"}
+
+
+def file_info(path: str) -> dict:
+    """Get detailed info about a file or directory."""
+    target = resolve_path(path)
+    
+    if not target.exists():
+        raise ValueError(f"Not found: {path}")
+    
+    stat = target.stat()
+    info = {
+        "action": "info",
+        "path": str(target),
+        "name": target.name,
+        "is_file": target.is_file(),
+        "is_directory": target.is_dir(),
+        "size": stat.st_size,
+        "modified": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+        "created": datetime.fromtimestamp(stat.st_ctime).strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    
+    if target.is_dir():
+        try:
+            items = list(target.iterdir())
+            info["children"] = len(items)
+        except PermissionError:
+            info["children"] = "access denied"
+    
+    return info
+
+
+def tree(path: str = "", max_depth: int = 3) -> dict:
+    """Show directory tree."""
+    dir_path = resolve_path(path)
+    
+    if not dir_path.exists() or not dir_path.is_dir():
+        raise ValueError(f"Invalid directory: {path}")
+    
+    lines = [str(dir_path)]
+    count = {"files": 0, "dirs": 0}
+    
+    def walk(directory: Path, prefix: str, depth: int):
+        if depth > max_depth:
+            return
+        
+        try:
+            entries = sorted(directory.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower()))
+        except PermissionError:
+            return
+        
+        for i, entry in enumerate(entries):
+            if is_forbidden(entry) or entry.name.startswith('.'):
+                continue
+            
+            is_last = i == len(entries) - 1
+            connector = "└── " if is_last else "├── "
+            
+            if entry.is_dir():
+                lines.append(f"{prefix}{connector}📁 {entry.name}/")
+                count["dirs"] += 1
+                extension = "    " if is_last else "│   "
+                walk(entry, prefix + extension, depth + 1)
+            else:
+                size = entry.stat().st_size
+                size_str = f"{size}" if size < 1024 else f"{size // 1024}KB"
+                lines.append(f"{prefix}{connector}📄 {entry.name} ({size_str})")
+                count["files"] += 1
+            
+            if count["files"] + count["dirs"] >= 200:
+                lines.append(f"{prefix}    ... (truncated)")
+                return
+    
+    walk(dir_path, "", 1)
+    
+    return {
+        "action": "tree",
+        "path": str(dir_path),
+        "tree": "\n".join(lines),
+        "total_files": count["files"],
+        "total_dirs": count["dirs"]
+    }
+
+
+def open_path(path: str) -> dict:
+    """Open a file or folder in its default application (File Explorer for folders)."""
+    import subprocess
+    target = resolve_path(path)
+    
+    if not target.exists():
+        raise ValueError(f"Not found: {path}")
+    
+    # Use os.startfile on Windows to open in default app
     try:
-        # Ensure workspace exists
-        WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
+        os.startfile(str(target))
+    except AttributeError:
+        # Fallback for non-Windows
+        subprocess.Popen(['xdg-open', str(target)])
+    
+    kind = "folder" if target.is_dir() else "file"
+    return {
+        "action": "open",
+        "path": str(target),
+        "message": f"Opened {kind}: {target.name}"
+    }
+
+
+# ── Main Entry Point ──
+def main():
+    try:
+        params = json.loads(os.environ.get("SKILL_PARAMS", "{}"))
+        action = params.get("action", "")
         
-        # Get parameters
-        params_json = os.environ.get("SKILL_PARAMS", "{}")
-        params = json.loads(params_json)
+        actions = {
+            "list": lambda: list_files(params.get("path", ""), params.get("pattern", "*")),
+            "read": lambda: read_file(params.get("path", "")),
+            "write": lambda: write_file(params.get("path", ""), params.get("content", "")),
+            "create": lambda: write_file(params.get("path", ""), params.get("content", "")),
+            "edit": lambda: write_file(params.get("path", ""), params.get("content", "")),
+            "move": lambda: move_file(params.get("path", ""), params.get("new_path", "")),
+            "copy": lambda: copy_file(params.get("path", ""), params.get("new_path", "")),
+            "delete": lambda: delete_file(params.get("path", "")),
+            "search": lambda: search_files(params.get("path", ""), params.get("pattern", "*"), params.get("search_term", "")),
+            "mkdir": lambda: mkdir(params.get("path", "")),
+            "info": lambda: file_info(params.get("path", "")),
+            "tree": lambda: tree(params.get("path", ""), params.get("max_depth", 3)),
+            "open": lambda: open_path(params.get("path", "")),
+        }
         
-        action = params.get("action")
-        if not action:
-            raise ValueError("Missing required parameter: action")
+        if action not in actions:
+            raise ValueError(f"Unknown action: {action}. Available: {', '.join(actions.keys())}")
         
-        # Execute action
-        if action == "create":
-            path = params.get("path")
-            content = params.get("content", "")
-            if not path:
-                raise ValueError("Missing required parameter: path")
-            result = create_file(path, content)
-        
-        elif action == "read":
-            path = params.get("path")
-            if not path:
-                raise ValueError("Missing required parameter: path")
-            result = read_file(path)
-        
-        elif action == "edit":
-            path = params.get("path")
-            content = params.get("content", "")
-            if not path:
-                raise ValueError("Missing required parameter: path")
-            result = edit_file(path, content)
-        
-        elif action == "list":
-            path = params.get("path", ".")
-            pattern = params.get("pattern", "*")
-            result = list_files(path, pattern)
-        
-        elif action == "move":
-            path = params.get("path")
-            new_path = params.get("new_path")
-            if not path or not new_path:
-                raise ValueError("Missing required parameters: path and new_path")
-            result = move_file(path, new_path)
-        
-        elif action == "delete":
-            path = params.get("path")
-            if not path:
-                raise ValueError("Missing required parameter: path")
-            result = delete_file(path)
-        
-        elif action == "search":
-            search_term = params.get("search_term")
-            if not search_term:
-                raise ValueError("Missing required parameter: search_term")
-            pattern = params.get("pattern", "*")
-            path = params.get("path", ".")
-            result = search_files(search_term, pattern, path)
-        
-        else:
-            raise ValueError(f"Unknown action: {action}")
-        
-        # Output result
-        print(json.dumps(result, indent=2))
+        result = actions[action]()
+        print(json.dumps(result, indent=2, default=str))
     
     except Exception as e:
-        print(json.dumps({
-            "error": str(e),
-            "action": params.get("action", "unknown")
-        }))
+        print(json.dumps({"error": str(e), "action": params.get("action", "unknown")}))
         sys.exit(1)
 
 

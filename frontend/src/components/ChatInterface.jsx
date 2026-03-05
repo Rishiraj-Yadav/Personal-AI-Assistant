@@ -26,6 +26,22 @@ function ChatInterface({ conversationId, setConversationId }) {
     inputRef.current?.focus()
   }, [])
 
+  // Auto-dismiss errors after 5 seconds
+  useEffect(() => {
+    if (error) {
+      const timer = setTimeout(() => setError(null), 5000)
+      return () => clearTimeout(timer)
+    }
+  }, [error])
+
+  // Handle suggestion chip clicks
+  const handleSuggestion = (text) => {
+    // Strip the emoji prefix
+    const cleanText = text.replace(/^[^\w]+\s*/, '')
+    setInputMessage(cleanText)
+    inputRef.current?.focus()
+  }
+
   const sendMessage = async (e) => {
     e.preventDefault()
     if (!inputMessage.trim() || isLoading) return
@@ -191,7 +207,11 @@ function ChatInterface({ conversationId, setConversationId }) {
         </div>
       )}
 
-      <MessageList messages={messages} isLoading={isLoading} />
+      <MessageList
+        messages={messages}
+        isLoading={isLoading}
+        onSuggestionClick={handleSuggestion}
+      />
       <div ref={messagesEndRef} />
 
       <form onSubmit={sendMessage} className="chat-input-form">
@@ -200,7 +220,7 @@ function ChatInterface({ conversationId, setConversationId }) {
           type="text"
           value={inputMessage}
           onChange={(e) => setInputMessage(e.target.value)}
-          placeholder={useMultiAgent ? "Describe code to generate..." : "Message OpenClaw..."}
+          placeholder={useMultiAgent ? "Describe code to generate..." : "Message SoNAR..."}
           className="chat-input"
           disabled={isLoading}
           autoFocus
@@ -210,7 +230,17 @@ function ChatInterface({ conversationId, setConversationId }) {
           className="btn-send"
           disabled={!inputMessage.trim() || isLoading}
         >
-          {isLoading ? '⏳' : '↑'}
+          {isLoading ? (
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+              <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2" strokeDasharray="31.42" strokeDashoffset="10">
+                <animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="1s" repeatCount="indefinite" />
+              </circle>
+            </svg>
+          ) : (
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M3.4 20.4l17.45-7.48a1 1 0 0 0 0-1.84L3.4 3.6a.993.993 0 0 0-1.39.91L2 9.12c0 .5.37.93.87.99L17 12 2.87 13.88c-.5.07-.87.5-.87 1l.01 4.61c0 .71.73 1.2 1.39.91z" />
+            </svg>
+          )}
         </button>
       </form>
     </div>

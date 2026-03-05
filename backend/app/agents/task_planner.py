@@ -30,6 +30,7 @@ class DAGNode:
     timeout_s: int = 30
     retries: int = 2
     fallback: Optional[str] = None              # Alternative agent if this fails
+    risk_level: str = "low"                     # low | medium | high
 
     def to_dict(self) -> Dict:
         return asdict(self)
@@ -169,6 +170,7 @@ class TaskPlanner:
                     timeout_s=node.timeout_s,
                     retries=1,
                     fallback=None,
+                    risk_level=node.risk_level,
                 )
                 new_nodes.append(new_node)
             elif failed and attempt >= 2:
@@ -198,8 +200,8 @@ class TaskPlanner:
 User Request: "{user_message}"
 
 Available Agents:
-1. DESKTOP — Control the computer: open apps, click, type, screenshots
-   Actions: open_app, screenshot, mouse_click, keyboard_type, window_manage
+1. DESKTOP — Control the computer: open apps, click, type, screenshots, manage files
+   Actions: open_app, screenshot, mouse_click, keyboard_type, window_manage, file_manager
    
 2. BROWSER — Navigate websites: go to URLs, click buttons, fill forms, search
    Actions: navigate, click, type, search, extract
@@ -207,7 +209,17 @@ Available Agents:
 3. CODING — Write, execute, and debug code in a sandbox
    Actions: generate, execute, debug
 
-4. GENERAL — Answer questions, have conversations, explain things
+4. QA — Verify generated code by writing and running automated tests
+   Actions: verify
+   IMPORTANT: Always add a QA step AFTER any CODING step. The QA step must depend on the coding step and use context_keys ["files", "project_type"].
+
+5. EMAIL — Send, read, search, and reply to emails
+   Actions: send, read, search, reply
+
+6. DEVOPS — Manage infrastructure, health checks, and environment cleanup
+   Actions: health_check, cleanup, provision, diagnose
+
+7. GENERAL — Answer questions, have conversations, explain things
    Actions: chat
 
 Rules:
@@ -217,6 +229,11 @@ Rules:
   They can run in PARALLEL (same depends_on)
 - Browser tasks that need a specific browser should have a desktop step first
 - Simple questions = single GENERAL step
+- CODING tasks MUST be followed by a QA verify step that depends on the coding step
+- File operations (read, write, move, copy, search, delete) use DESKTOP with file_manager action
+- Email tasks (send, read, search, reply) use EMAIL agent
+- Sending emails, deleting files, or running destructive commands is 'high' risk
+- Assign a `risk_level` to each step (low, medium, high). Executing code that modifies files or system state is 'high' risk. Safe browsing or chatting is 'low' risk.
 
 Return ONLY valid JSON in this exact format:
 {{
@@ -230,7 +247,8 @@ Return ONLY valid JSON in this exact format:
       "context_keys": [],
       "timeout_s": 10,
       "retries": 2,
-      "fallback": "browser"
+      "fallback": "browser",
+      "risk_level": "medium"
     }},
     {{
       "id": "1",
@@ -241,7 +259,8 @@ Return ONLY valid JSON in this exact format:
       "context_keys": ["cdp_port", "cdp_url"],
       "timeout_s": 30,
       "retries": 1,
-      "fallback": null
+      "fallback": null,
+      "risk_level": "low"
     }}
   ],
   "complexity": "compound",
@@ -282,6 +301,7 @@ Respond with ONLY the JSON, no explanation."""
                     timeout_s=node_data.get("timeout_s", 30),
                     retries=node_data.get("retries", 2),
                     fallback=node_data.get("fallback"),
+                    risk_level=node_data.get("risk_level", "low"),
                 )
             )
 

@@ -1,8 +1,8 @@
 {
   "name": "file_manager",
-  "version": "0.1.0",
-  "author": "openclaw@example.com",
-  "description": "Manages files in a sandboxed workspace: create, read, edit, list, move, and delete files safely",
+  "version": "1.0.0",
+  "author": "sonar@example.com",
+  "description": "Manage files and directories ANYWHERE on the user's computer. Supports: list, read, write, move, copy, delete, search, mkdir, info, tree. Accepts absolute paths like C:\\Users\\User\\Documents.",
   "permissions": [
     "file.read",
     "file.write"
@@ -11,57 +11,67 @@
     {
       "name": "action",
       "type": "string",
-      "description": "Action to perform: create, read, edit, list, move, delete, search",
+      "description": "Action: list, read, write, move, copy, delete, search, mkdir, info, tree, open",
       "required": true
     },
     {
       "name": "path",
       "type": "string",
-      "description": "File or directory path (relative to workspace)",
+      "description": "File or directory path (absolute like C:\\Users\\User\\Documents or relative to user home)",
       "required": false
     },
     {
       "name": "content",
       "type": "string",
-      "description": "File content for create/edit actions",
+      "description": "File content for write/create/edit actions",
       "required": false
     },
     {
       "name": "new_path",
       "type": "string",
-      "description": "New path for move/rename action",
+      "description": "Destination path for move/copy actions",
       "required": false
     },
     {
       "name": "search_term",
       "type": "string",
-      "description": "Term to search for in files",
+      "description": "Text to search for inside files",
       "required": false
     },
     {
       "name": "pattern",
       "type": "string",
-      "description": "File pattern for list/search (e.g., *.py, *.txt)",
+      "description": "File glob pattern for list/search (e.g. *.pdf, *.py)",
+      "required": false
+    },
+    {
+      "name": "max_depth",
+      "type": "number",
+      "description": "Max depth for tree action (default 3)",
       "required": false
     }
   ],
   "execution": {
     "type": "python_script",
     "entry_point": "file_ops.py",
-    "timeout": 15,
+    "timeout": 30,
     "memory_limit": "256M",
     "cpu_limit": 0.5,
-    "environment": {
-      "WORKSPACE_ROOT": "/workspace"
-    }
+    "environment": {}
   },
-  "tags": ["files", "workspace", "filesystem"],
+  "tags": [
+    "files",
+    "filesystem",
+    "desktop",
+    "organize"
+  ],
   "examples": [
-    "Create a Python file called hello.py with a hello world function",
-    "Read the contents of config.json",
-    "List all Python files in the workspace",
-    "Search for TODO comments in all files",
-    "Move data.csv to archive/data_old.csv"
+    "List my Documents folder",
+    "Show me what's in my Downloads",
+    "Read C:\\Users\\User\\Desktop\\notes.txt",
+    "Search for .pdf files in my Documents",
+    "Organize my Downloads folder",
+    "Create a new folder on my Desktop"
   ],
   "verified": true
 }

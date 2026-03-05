@@ -102,6 +102,8 @@ class SupervisorAgent:
         memory = ContextMemory(pipeline_id)
         result = None
 
+        MAX_SELF_CORRECTIONS = 3
+
         for attempt in range(1, MAX_PIPELINE_RETRIES + 1):
             result = await self.engine.execute(
                 pipeline_id=pipeline_id,
@@ -114,7 +116,74 @@ class SupervisorAgent:
             if result.all_succeeded:
                 break
 
-            # Re-plan failed steps
+            # ── Self-Correction Loop ──
+            # Check if the failure was from a QA step specifically
+            qa_failures = [
+                s for s in result.steps
+                if s.agent == "qa" and not s.success
+            ]
+
+            if qa_failures:
+                # Find the coding step that preceded the QA step
+                coding_steps = [s for s in result.steps if s.agent == "coding" and s.success]
+                correction_iteration = int(memory.get_session("correction_iteration", 1))
+
+                if correction_iteration < MAX_SELF_CORRECTIONS and coding_steps:
+                    correction_iteration += 1
+                    qa_feedback = qa_failures[0].output.get("feedback", qa_failures[0].error) if isinstance(qa_failures[0].output, dict) else qa_failures[0].error
+                    logger.info(
+                        f"🔄 Self-Correction: QA failed → re-running coding with feedback "
+                        f"(iteration {correction_iteration}/{MAX_SELF_CORRECTIONS})"
+                    )
+
+                    # Store correction context so _dispatch_coding picks it up
+                    memory.set_session("correction_iteration", correction_iteration)
+                    memory.set_session("qa_feedback", qa_feedback)
+                    memory.set_session("previous_error", qa_feedback)
+
+                    if message_callback:
+                        await message_callback({
+                            "type": "self_correction",
+                            "message": f"🔄 QA failed — auto-correcting code (attempt {correction_iteration}/{MAX_SELF_CORRECTIONS})...",
+                            "iteration": correction_iteration,
+                            "feedback_preview": str(qa_feedback)[:200],
+                        })
+
+                    # Rebuild a mini DAG: coding → qa
+                    correction_dag = ExecutionDAG(
+                        nodes=[
+                            DAGNode(
+                                id=f"fix_{correction_iteration}",
+                                agent="coding",
+                                action="generate",
+                                params=dag.nodes[0].params if dag.nodes else {},
+                                context_keys=["qa_feedback", "previous_error", "correction_iteration", "files", "project_type"],
+                                timeout_s=60,
+                                retries=1,
+                                risk_level="medium",
+                            ),
+                            DAGNode(
+                                id=f"verify_{correction_iteration}",
+                                agent="qa",
+                                action="verify",
+                                depends_on=[f"fix_{correction_iteration}"],
+                                context_keys=["files", "project_type"],
+                                timeout_s=60,
+                                retries=0,
+                                risk_level="low",
+                            ),
+                        ],
+                        complexity="compound",
+                        reasoning=f"Self-correction iteration {correction_iteration}",
+                    )
+                    dag = correction_dag
+                    continue  # Re-run with correction DAG
+
+                else:
+                    logger.warning(f"🛑 Max self-corrections ({MAX_SELF_CORRECTIONS}) reached — accepting result")
+                    break
+
+            # Re-plan failed steps (non-QA failures)
             failed_steps = [
                 {"step_id": s.step_id, "error": s.error}
                 for s in result.steps if not s.success

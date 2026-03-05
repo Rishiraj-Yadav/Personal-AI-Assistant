@@ -1,12 +1,18 @@
 {
-  "name": "frontend",
+  "name": "sonar",
+  "productName": "SoNAR",
+  "version": "1.0.0",
+  "description": "SoNAR — Your Personal AI Assistant",
   "private": true,
-  "version": "0.0.0",
   "type": "module",
-"scripts": {
+  "main": "electron/main.cjs",
+  "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
+    "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:3000 && electron .\"",
+    "electron:build": "vite build && electron-builder",
+    "electron:start": "electron .",
     "lint": "eslint . --ext js,jsx --report-unused-disable-directives --max-warnings 0"
   },
   "dependencies": {
@@ -19,10 +25,38 @@
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.1",
+    "concurrently": "^9.1.2",
+    "electron": "^35.0.0",
+    "electron-builder": "^26.0.0",
+    "electron-squirrel-startup": "^1.0.1",
     "eslint": "^9.39.1",
     "eslint-plugin-react-hooks": "^7.0.1",
     "eslint-plugin-react-refresh": "^0.4.24",
     "globals": "^16.5.0",
-    "vite": "^7.3.1"
+    "vite": "^7.3.1",
+    "wait-on": "^8.0.3"
+  },
+  "build": {
+    "appId": "com.sonar.assistant",
+    "productName": "SoNAR",
+    "win": {
+      "target": "nsis",
+      "icon": "public/sonar-icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "public/**/*"
+    ]
   }
 }

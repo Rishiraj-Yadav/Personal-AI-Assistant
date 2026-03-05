@@ -68,6 +68,27 @@ DESKTOP_API_KEY = os.getenv("DESKTOP_AGENT_API_KEY", "")
 class PipelineEngine:
     """Executes multi-step agent pipelines with context passing."""
 
+    # Class-level dict for HITL approvals — shared across all instances
+    pending_approvals: Dict[str, Any] = {}
+
+    @classmethod
+    def resolve_approval(cls, pipeline_id: str, step_id: str, approved: bool) -> bool:
+        """Resolve a pending HITL approval. Called by WebSocket/API endpoint."""
+        key = f"{pipeline_id}:{step_id}"
+        if key in cls.pending_approvals:
+            cls.pending_approvals[key]["approved"] = approved
+            cls.pending_approvals[key]["event"].set()
+            return True
+        return False
+
+    @classmethod
+    def get_pending_approvals(cls) -> List[Dict]:
+        """Get all pending HITL approvals for the frontend."""
+        return [
+            {"key": k, "node": v["node"], "pipeline_id": v["pipeline_id"]}
+            for k, v in cls.pending_approvals.items()
+        ]
+
     def __init__(self):
         self.monitor = agent_monitor
 
@@ -220,6 +241,53 @@ class PipelineEngine:
     ) -> StepResult:
         """Execute a single DAG node with retries and fallback."""
 
+        # ── HITL Checkpoint ──
+        risk_level = getattr(node, "risk_level", "low")
+        if risk_level == "high":
+            logger.warning(f"⚠️ HITL Checkpoint: Step {node.id} ({node.agent}.{node.action}) is HIGH RISK.")
+            self.monitor.log_step(
+                pipeline_id, node.id, node.agent, node.action,
+                event_type="hitl_checkpoint", status="waiting_approval"
+            )
+
+            # Store a pending approval event
+            approval_key = f"{pipeline_id}:{node.id}"
+            approval_event = asyncio.Event()
+            PipelineEngine.pending_approvals[approval_key] = {
+                "event": approval_event,
+                "node": node.to_dict(),
+                "pipeline_id": pipeline_id,
+                "approved": None,
+            }
+
+            # Notify the frontend via callback
+            if hasattr(self, '_current_callback') and self._current_callback:
+                await self._current_callback({
+                    "type": "hitl_approval_required",
+                    "message": f"⚠️ HIGH RISK: {node.agent}.{node.action} requires your approval",
+                    "pipeline_id": pipeline_id,
+                    "step_id": node.id,
+                    "agent": node.agent,
+                    "action": node.action,
+                    "params": node.params,
+                })
+
+            # Wait for approval (timeout: 120s auto-approve)
+            try:
+                await asyncio.wait_for(approval_event.wait(), timeout=120)
+            except asyncio.TimeoutError:
+                logger.info(f"⏰ HITL Timeout: Step {node.id} auto-approved after 120s.")
+
+            approval_data = PipelineEngine.pending_approvals.pop(approval_key, {})
+            if approval_data.get("approved") is False:
+                logger.info(f"🛑 HITL DENIED: Step {node.id} rejected by user.")
+                return StepResult(
+                    step_id=node.id, agent=node.agent, action=node.action,
+                    success=False, error="Step denied by user via HITL checkpoint",
+                )
+
+            logger.info(f"✅ HITL Checkpoint: Step {node.id} approved for execution.")
+
         for attempt in range(1, node.retries + 2):  # retries + 1 initial attempt
             start = time.time()
 
@@ -335,12 +403,25 @@ class PipelineEngine:
             return await self._dispatch_browser(node, context)
         elif node.agent == "coding":
             return await self._dispatch_coding(node, context)
+        elif node.agent == "qa":
+            return await self._dispatch_qa(node, context)
+        elif node.agent == "devops":
+            return await self._dispatch_devops(node, context)
+        elif node.agent == "email":
+            return await self._dispatch_email(node, context)
         else:
             return await self._dispatch_general(node, context)
 
     async def _dispatch_desktop(self, node: DAGNode, context: Dict) -> StepResult:
         """Execute via Desktop Agent HTTP API."""
         try:
+            # ── MCP-lite Internal Protocol ──
+            mcp_payload = {
+                "action": node.action,
+                "resources": node.params,
+                "context": context
+            }
+
             # Map action to Desktop Agent skill format
             skill_map = {
                 "open_app": "app_launcher",
@@ -349,12 +430,12 @@ class PipelineEngine:
                 "keyboard_type": "keyboard_control",
                 "window_manage": "window_manager",
             }
-            skill_name = skill_map.get(node.action, node.action)
+            skill_name = skill_map.get(mcp_payload["action"], mcp_payload["action"])
 
-            # Build request
+            # Build Legacy HTTP request
             payload = {
                 "skill": skill_name,
-                "args": {**node.params, **context},
+                "args": {**mcp_payload["resources"], **mcp_payload["context"]},
             }
             headers = {"X-API-Key": DESKTOP_API_KEY}
 
@@ -403,15 +484,23 @@ class PipelineEngine:
     async def _dispatch_browser(self, node: DAGNode, context: Dict) -> StepResult:
         """Execute via Browser Agent HTTP API."""
         try:
-            # Build goal from action + params
-            params = {**node.params, **context}
-            goal = params.get("goal") or params.get("url") or node.action
+            # ── MCP-lite Internal Protocol ──
+            mcp_payload = {
+                "action": node.action,
+                "resources": node.params,
+                "context": context
+            }
 
+            # Extract resources and context
+            params = {**mcp_payload["resources"], **mcp_payload["context"]}
+            goal = params.get("goal") or params.get("url") or mcp_payload["action"]
+
+            # Legacy HTTP Payload
             payload = {"goal": goal}
 
             # Pass CDP URL if available from context (Desktop → Browser handoff)
-            if context.get("cdp_url"):
-                payload["cdp_url"] = context["cdp_url"]
+            if mcp_payload["context"].get("cdp_url"):
+                payload["cdp_url"] = mcp_payload["context"]["cdp_url"]
 
             # Read API key from browser-agent config
             browser_api_key = ""
@@ -470,8 +559,20 @@ class PipelineEngine:
             from ..services.sandbox_services import sandbox_service
 
             description = node.params.get("task", node.params.get("description", ""))
+
+            # ── Self-Correction: Check if QA feedback exists from a previous iteration ──
+            qa_feedback = context.get("qa_feedback")
+            previous_error = context.get("previous_error") or qa_feedback
+            iteration = int(context.get("correction_iteration", 1))
+
+            if previous_error and iteration > 1:
+                logger.info(f"🔄 Self-Correction: Coding iteration {iteration} with QA feedback")
+
             result = await code_specialist.generate_code(
-                description=description, context=None, iteration=1,
+                description=description,
+                context=None,
+                iteration=iteration,
+                previous_error=previous_error,
             )
 
             if result.get("success") and result.get("files"):
@@ -484,7 +585,11 @@ class PipelineEngine:
                     step_id=node.id, agent="coding", action=node.action,
                     success=exec_result.get("success", False),
                     output=exec_result,
-                    context_out={"code_output": exec_result.get("stdout", "")},
+                    context_out={
+                        "code_output": exec_result.get("stdout", ""),
+                        "files": result.get("files", {}),
+                        "project_type": result.get("project_type", "python")
+                    }
                 )
             else:
                 return StepResult(
@@ -494,6 +599,97 @@ class PipelineEngine:
         except Exception as e:
             return StepResult(
                 step_id=node.id, agent="coding", action=node.action,
+                success=False, error=str(e),
+            )
+
+    async def _dispatch_qa(self, node: DAGNode, context: Dict) -> StepResult:
+        """Execute QA Verification Agent to write and run tests."""
+        try:
+            from .qa_specialist_agent import qa_specialist
+
+            # The code files should come from the context (previous coding step's output)
+            files = context.get("files", {})
+            if not files and node.params.get("files"):
+                files = node.params["files"]
+                
+            project_type = context.get("project_type", node.params.get("project_type", "python"))
+            request_desc = node.params.get("task", "Verify the generated code works correctly.")
+
+            if not files:
+                return StepResult(
+                    step_id=node.id, agent="qa", action=node.action,
+                    success=False, error="No files provided to QA agent in context or params."
+                )
+
+            result = await qa_specialist.verify_code(
+                files=files, project_type=project_type, original_request=request_desc
+            )
+
+            tests_passed = result.get("tests_passed", False)
+            return StepResult(
+                step_id=node.id, agent="qa", action=node.action,
+                success=tests_passed,
+                output=result,
+                context_out={
+                    "tests_passed": tests_passed,
+                    "qa_feedback": result.get("feedback", ""),
+                    "test_output": result.get("test_output", ""),
+                }
+            )
+        except Exception as e:
+            return StepResult(
+                step_id=node.id, agent="qa", action=node.action,
+                success=False, error=str(e),
+            )
+
+    async def _dispatch_devops(self, node: DAGNode, context: Dict) -> StepResult:
+        """Execute DevOps Agent for infrastructure management."""
+        try:
+            from .devops_agent import devops_agent
+
+            result = await devops_agent.execute(
+                action=node.action,
+                params=node.params,
+                context=context,
+            )
+
+            return StepResult(
+                step_id=node.id, agent="devops", action=node.action,
+                success=result.get("success", False),
+                output=result,
+                context_out={
+                    "devops_status": result.get("message", ""),
+                    "services_health": result.get("services", {}),
+                },
+            )
+        except Exception as e:
+            return StepResult(
+                step_id=node.id, agent="devops", action=node.action,
+                success=False, error=str(e),
+            )
+
+    async def _dispatch_email(self, node: DAGNode, context: Dict) -> StepResult:
+        """Execute Email Agent for sending/reading emails."""
+        try:
+            from .email_agent import email_agent
+
+            result = await email_agent.execute(
+                action=node.action,
+                params=node.params,
+                context=context,
+            )
+
+            return StepResult(
+                step_id=node.id, agent="email", action=node.action,
+                success=result.get("success", False),
+                output=result,
+                context_out={
+                    "email_result": result.get("message", ""),
+                },
+            )
+        except Exception as e:
+            return StepResult(
+                step_id=node.id, agent="email", action=node.action,
                 success=False, error=str(e),
             )
 

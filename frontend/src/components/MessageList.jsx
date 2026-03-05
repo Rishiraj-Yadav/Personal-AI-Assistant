@@ -1,4 +1,4 @@
-function MessageList({ messages, isLoading }) {
+function MessageList({ messages, isLoading, onSuggestionClick }) {
   const formatTimestamp = (timestamp) => {
     const date = new Date(timestamp)
     return date.toLocaleTimeString('en-US', {
@@ -59,26 +59,26 @@ function MessageList({ messages, isLoading }) {
     <div className="message-list">
       {messages.length === 0 && !isLoading && (
         <div className="welcome-message">
-          <div className="welcome-icon">⚡</div>
-          <h2>How can I help you?</h2>
-          <p>I can automate your desktop, browse the web, write code, and more.</p>
+          <div className="welcome-icon">✦</div>
+          <h2>Hello, how can I help?</h2>
+          <p>I can control your desktop, browse the web, write code, manage files, send emails, and more.</p>
 
           <div className="mode-cards">
             <div className="mode-card">
-              <h3>💬 Chat</h3>
-              <p>Conversations, desktop control, web scraping</p>
+              <h3>💬 Chat Mode</h3>
+              <p>Conversations, desktop control, web browsing, file management</p>
             </div>
             <div className="mode-card highlight">
               <h3>🤖 Multi-Agent</h3>
-              <p>Code generation with auto-testing & fixing</p>
+              <p>Code generation with auto-testing, self-correction & deployment</p>
             </div>
           </div>
 
           <div className="suggestion-chips">
-            <button className="suggestion-chip">💡 Open Task Manager</button>
-            <button className="suggestion-chip">💡 What's the weather?</button>
-            <button className="suggestion-chip">💡 Write a Python script</button>
-            <button className="suggestion-chip">💡 Search YouTube</button>
+            <button className="suggestion-chip" onClick={() => onSuggestionClick?.('✨ Open Task Manager')}>✨ Open Task Manager</button>
+            <button className="suggestion-chip" onClick={() => onSuggestionClick?.('📁 Organize my Downloads')}>📁 Organize my Downloads</button>
+            <button className="suggestion-chip" onClick={() => onSuggestionClick?.('💻 Write a Python script')}>💻 Write a Python script</button>
+            <button className="suggestion-chip" onClick={() => onSuggestionClick?.('🌐 Search YouTube')}>🌐 Search YouTube</button>
           </div>
         </div>
       )}
@@ -87,7 +87,7 @@ function MessageList({ messages, isLoading }) {
         <div key={index} className={`message message-${message.role}`}>
           <div className="message-header">
             <span className="message-role">
-              {message.role === 'user' ? 'You' : 'OpenClaw'}
+              {message.role === 'user' ? 'You' : 'SoNAR'}
             </span>
             <span className="message-time">
               {formatTimestamp(message.timestamp)}
