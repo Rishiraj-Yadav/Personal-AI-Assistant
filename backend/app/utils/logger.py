@@ -22,7 +22,7 @@ def setup_logging():
     
     # File logging
     logger.add(
-        "logs/openclaw_{time:YYYY-MM-DD}.log",
+        "logs/sonarbot_{time:YYYY-MM-DD}.log",
         rotation="00:00",  # Rotate at midnight
         retention="7 days",  # Keep logs for 7 days
         compression="zip",  # Compress old logs

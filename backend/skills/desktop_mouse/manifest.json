@@ -1,7 +1,7 @@
 {
   "name": "desktop_mouse",
   "version": "1.0.0",
-  "author": "openclaw@example.com",
+  "author": "sonarbot@example.com",
   "description": "Controls the mouse on the desktop",
   "permissions": ["desktop.mouse"],
   "parameters": [

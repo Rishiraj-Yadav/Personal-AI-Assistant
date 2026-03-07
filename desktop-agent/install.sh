@@ -1,10 +1,10 @@
 #!/bin/bash
 
-# OpenClaw Desktop Agent - Installation Script
+# SonarBot Desktop Agent - Installation Script
 # Installs dependencies for desktop control
 
 echo "=================================================="
-echo "🖥️  OpenClaw Desktop Agent - Installation"
+echo "🖥️  SonarBot Desktop Agent - Installation"
 echo "=================================================="
 echo ""
 

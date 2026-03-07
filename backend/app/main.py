@@ -1,5 +1,5 @@
 """
-OpenClaw Agent - Main FastAPI Application - FIXED VERSION
+SonarBot - Main FastAPI Application
 """
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware

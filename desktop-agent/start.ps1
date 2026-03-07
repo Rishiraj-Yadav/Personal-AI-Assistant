@@ -1,4 +1,4 @@
-# OpenClaw Desktop Agent - Startup Script
+# SonarBot Desktop Agent - Startup Script
 
 Write-Host "Starting Desktop Agent Service..."
 Write-Host ""
@@ -52,7 +52,7 @@ python desktop_agent.py
 
 # #!/bin/bash
 
-# # OpenClaw Desktop Agent - Startup Script
+# # SonarBot Desktop Agent - Startup Script
 
 # echo "🖥️  Starting Desktop Agent Service..."
 # echo ""

@@ -1,5 +1,14 @@
 """
-Enhanced Memory Service - Integrates SQL + Vector Memory
+Enhanced Memory Service - SonarBot Dual-Layer Memory
+Integrates SQL (structured) + Qdrant Vector (semantic) memory.
+
+KEY DESIGN: Every message is saved to BOTH databases.
+- SQL: Conversation structure, user profiles, preferences
+- Qdrant: Semantic embeddings for cross-conversation retrieval
+
+Memory persists across:
+- New chats (same user_id, different conversation_id)
+- System restarts (SQLite file + Qdrant storage on disk)
 """
 from typing import Dict, List, Any, Optional
 from datetime import datetime, timezone
@@ -16,14 +25,13 @@ from app.database.base import SessionLocal
 
 class EnhancedMemoryService:
     """
-    Enhanced memory service with vector integration
-    
-    Manages both structured (SQL) and semantic (Vector) memory
+    Dual-layer memory service:
+    - SQL for structured data (users, conversations, messages, preferences)
+    - Qdrant for semantic search (embeddings, insights, cross-conversation retrieval)
     """
     
     def __init__(self):
         self.session_factory = SessionLocal
-        # Vector memory will be imported when needed to avoid circular dependency
         self._vector_memory = None
     
     @property
@@ -67,7 +75,7 @@ class EnhancedMemoryService:
         finally:
             session.close()
     
-    # ============ CONVERSATION MANAGEMENT (Enhanced) ============
+    # ============ CONVERSATION MANAGEMENT (Dual-Layer) ============
     
     def save_message(
         self,
@@ -78,21 +86,17 @@ class EnhancedMemoryService:
         metadata: Dict = None
     ):
         """
-        Save message to BOTH SQL and Vector databases
+        Save message to BOTH SQL and Vector databases.
         
-        Args:
-            conversation_id: Conversation ID
-            user_id: User ID
-            role: 'user' or 'assistant'
-            content: Message content
-            metadata: Additional metadata
+        SQL: Structured storage for conversation history retrieval
+        Qdrant: Semantic embedding for cross-conversation search
         """
         session = self.session_factory()
         try:
             # Ensure user exists
             self.ensure_user_exists(user_id)
             
-            # Get or create conversation
+            # Get or create conversation in SQL
             conv = session.query(Conversation).filter_by(
                 conversation_id=conversation_id
             ).first()
@@ -101,7 +105,7 @@ class EnhancedMemoryService:
                 conv = Conversation(
                     conversation_id=conversation_id,
                     user_id=user_id,
-                    title=content[:100],
+                    title=content[:100] if role == 'user' else 'New conversation',
                     created_at=datetime.now(timezone.utc),
                     last_message_at=datetime.now(timezone.utc),
                     message_count=0
@@ -118,9 +122,9 @@ class EnhancedMemoryService:
                 timestamp=datetime.now(timezone.utc)
             )
             session.add(message)
-            session.flush()  # Get message ID
+            session.flush()
             
-            # Update conversation
+            # Update conversation stats
             if conv.message_count is None:
                 conv.message_count = 0
             conv.last_message_at = datetime.now(timezone.utc)
@@ -128,18 +132,17 @@ class EnhancedMemoryService:
             
             session.commit()
             
-            # ✅ NEW: Save to vector database
+            # Save to Vector database (BOTH user and assistant messages)
             if self.vector_memory:
                 self.vector_memory.store_message(
                     user_id=user_id,
-                    message_id=message.message_id,
                     conversation_id=conversation_id,
                     role=role,
                     content=content,
                     metadata=metadata
                 )
             
-            logger.debug(f"💾 Saved message to SQL + Vector: {role}")
+            logger.debug(f"💾 Saved {role} message to SQL + Vector")
         
         except Exception as e:
             session.rollback()
@@ -147,12 +150,42 @@ class EnhancedMemoryService:
         finally:
             session.close()
     
+    def save_conversation_exchange(
+        self,
+        conversation_id: str,
+        user_id: str,
+        user_message: str,
+        assistant_response: str,
+        metadata: Dict = None
+    ):
+        """
+        Save a complete user+assistant exchange to vector DB as a pair.
+        This creates a combined embedding that captures the full context.
+        Also extracts facts/preferences from the exchange.
+        """
+        if self.vector_memory:
+            # Store the combined exchange for better semantic retrieval
+            self.vector_memory.store_conversation_pair(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                user_message=user_message,
+                assistant_response=assistant_response,
+                metadata=metadata
+            )
+            
+            # Extract and store facts/preferences from user message
+            self.vector_memory.extract_and_store_facts(
+                user_id=user_id,
+                user_message=user_message,
+                assistant_response=assistant_response
+            )
+    
     def get_conversation_history(
         self,
         conversation_id: str,
         limit: int = 20
     ) -> List[Dict]:
-        """Get conversation messages (from SQL)"""
+        """Get conversation messages from SQL"""
         session = self.session_factory()
         try:
             messages = session.query(Message).filter_by(
@@ -195,6 +228,36 @@ class EnhancedMemoryService:
         finally:
             session.close()
     
+    def get_all_user_messages(
+        self,
+        user_id: str,
+        limit: int = 50
+    ) -> List[Dict]:
+        """Get recent messages across ALL conversations for a user"""
+        session = self.session_factory()
+        try:
+            # Join Message with Conversation to filter by user_id
+            messages = (
+                session.query(Message)
+                .join(Conversation, Message.conversation_id == Conversation.conversation_id)
+                .filter(Conversation.user_id == user_id)
+                .order_by(Message.timestamp.desc())
+                .limit(limit)
+                .all()
+            )
+            
+            return [
+                {
+                    'role': msg.role,
+                    'content': msg.content,
+                    'conversation_id': msg.conversation_id,
+                    'timestamp': msg.timestamp.isoformat()
+                }
+                for msg in reversed(messages)
+            ]
+        finally:
+            session.close()
+    
     # ============ PREFERENCE LEARNING ============
     
     def learn_from_behavior(
@@ -221,14 +284,8 @@ class EnhancedMemoryService:
         finally:
             session.close()
     
-    def _learn_coding_preferences(
-        self,
-        session: Session,
-        user_id: str,
-        data: Dict
-    ):
+    def _learn_coding_preferences(self, session: Session, user_id: str, data: Dict):
         """Learn coding preferences"""
-        
         if data.get('language'):
             self._increment_preference(
                 session, user_id,
@@ -253,14 +310,8 @@ class EnhancedMemoryService:
                 value=data['project_type']
             )
     
-    def _learn_desktop_preferences(
-        self,
-        session: Session,
-        user_id: str,
-        data: Dict
-    ):
+    def _learn_desktop_preferences(self, session: Session, user_id: str, data: Dict):
         """Learn desktop preferences"""
-        
         if data.get('skills_used') and 'app_launcher' in data['skills_used']:
             app = data.get('actions_performed', {}).get('app')
             if app:
@@ -280,7 +331,6 @@ class EnhancedMemoryService:
         value: Any
     ):
         """Increment preference count and update confidence"""
-        
         pref = session.query(UserPreference).filter_by(
             user_id=user_id,
             category=category,
@@ -304,7 +354,6 @@ class EnhancedMemoryService:
             )
             session.add(pref)
         
-        # Calculate confidence
         total = session.query(func.sum(UserPreference.occurrences)).filter_by(
             user_id=user_id,
             category=category,
@@ -318,7 +367,7 @@ class EnhancedMemoryService:
         user_id: str,
         category: str = None
     ) -> Dict:
-        """Get user preferences (from SQL)"""
+        """Get user preferences from SQL"""
         session = self.session_factory()
         try:
             query = session.query(UserPreference).filter_by(user_id=user_id)
@@ -342,7 +391,6 @@ class EnhancedMemoryService:
                     'occurrences': pref.occurrences
                 })
             
-            # Sort by confidence
             for category_data in result.values():
                 for key in category_data:
                     category_data[key].sort(
@@ -360,7 +408,6 @@ class EnhancedMemoryService:
         task_type: str = None
     ) -> str:
         """Generate context string for AI prompts"""
-        
         prefs = self.get_user_preferences(user_id)
         
         if not prefs:

@@ -9,7 +9,7 @@ function App() {
     <div className="app">
       <header className="app-header">
         <div className="header-content">
-          <h1>🤖 OpenClaw Agent</h1>
+          <h1>🤖 SonarBot</h1>
           <p className="subtitle">AI-Powered Task Automation Assistant</p>
         </div>
         <div className="header-info">
@@ -29,7 +29,7 @@ function App() {
       </main>
       
       <footer className="app-footer">
-        <p>OpenClaw Agent v0.1.0 | Powered by Groq</p>
+        <p>SonarBot v0.2.0 | Powered by Groq</p>
       </footer>
     </div>
   )

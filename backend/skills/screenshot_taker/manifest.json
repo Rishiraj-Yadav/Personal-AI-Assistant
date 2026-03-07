@@ -1,7 +1,7 @@
 {
   "name": "screenshot_taker",
   "version": "0.1.0",
-  "author": "openclaw@example.com",
+  "author": "sonarbot@example.com",
   "description": "Captures a screenshot of a web page and returns base64 encoded image",
   "permissions": [
     "network.external",

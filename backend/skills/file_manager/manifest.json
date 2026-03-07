@@ -1,7 +1,7 @@
 {
   "name": "file_manager",
   "version": "0.1.0",
-  "author": "openclaw@example.com",
+  "author": "sonarbot@example.com",
   "description": "Manages files in a sandboxed workspace: create, read, edit, list, move, and delete files safely",
   "permissions": [
     "file.read",

@@ -1,9 +1,9 @@
 #!/bin/bash
 
-# OpenClaw Agent - Quick Start Script
+# SonarBot - Quick Start Script
 # This script helps you get started quickly
 
-echo "🤖 OpenClaw Agent - Quick Start"
+echo "🤖 SonarBot - Quick Start"
 echo "================================"
 echo ""
 
@@ -46,7 +46,7 @@ echo "✅ Configuration file found"
 echo ""
 
 # Start the application
-echo "🚀 Starting OpenClaw Agent..."
+echo "🚀 Starting SonarBot..."
 echo ""
 
 docker compose up --build -d
@@ -58,7 +58,7 @@ sleep 10
 # Check if services are running
 if docker compose ps | grep -q "Up"; then
     echo ""
-    echo "✅ OpenClaw Agent is running!"
+    echo "✅ SonarBot is running!"
     echo ""
     echo "🌐 Access the application:"
     echo "   Frontend:  http://localhost:3000"

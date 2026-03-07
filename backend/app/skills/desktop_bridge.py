@@ -37,52 +37,60 @@ class DesktopBridgeSkill:
             self.desktop_agent_url = "http://localhost:7777"
             logger.info("Running on host - using localhost:7777")
         
-        self.api_key = self._load_api_key()
+        self._cached_api_key = None
+        self._api_key_paths = self._get_api_key_paths()
         self.timeout = aiohttp.ClientTimeout(total=30)
         logger.info(f"✅ DesktopBridge initialized: {self.desktop_agent_url}")
     
     def _is_docker(self) -> bool:
         """Check if running inside Docker"""
-        # Check for Docker-specific files
-        return (
-            os.path.exists('/.dockerenv') or
-            os.path.exists('/proc/1/cgroup') and 'docker' in open('/proc/1/cgroup').read()
-        )
+        try:
+            return (
+                os.path.exists('/.dockerenv') or
+                (os.path.exists('/proc/1/cgroup') and 'docker' in open('/proc/1/cgroup').read())
+            )
+        except Exception:
+            return False
     
-    def _load_api_key(self) -> str:
-        """Load API key from desktop agent"""
-        # Try multiple locations
-        possible_paths = [
-            # Windows direct paths
-            Path("R:/6_semester/mini_project/PAI/desktop-agent/config/api_key.txt"),
-            
-            # Docker mount paths
-            Path("/desktop-agent-key/api_key.txt"),
+    def _get_api_key_paths(self) -> list:
+        """Get list of possible API key file paths"""
+        return [
+            # Docker mount path (from docker-compose volume)
             Path("/app/desktop_agent_key.txt"),
+            Path("/desktop-agent-key/api_key.txt"),
             
             # Relative paths (when running outside Docker)
             Path(__file__).parent.parent.parent / "desktop-agent" / "config" / "api_key.txt",
             Path("../desktop-agent/config/api_key.txt"),
             Path("../../desktop-agent/config/api_key.txt"),
+            
+            # Windows direct paths
+            Path("R:/6_semester/mini_project/PAI/desktop-agent/config/api_key.txt"),
         ]
+    
+    def _get_api_key(self) -> str:
+        """
+        Get API key - re-reads from file every time to handle key rotation.
+        The desktop agent generates a new key on each startup, so we must
+        always read the latest key from the file.
+        """
+        # Priority 1: Environment variable (stable, doesn't change)
+        env_key = os.environ.get("DESKTOP_AGENT_API_KEY", "").strip()
+        if env_key:
+            return env_key
         
-        for path in possible_paths:
+        # Priority 2: Read from file (re-read every time for fresh key)
+        for path in self._api_key_paths:
             try:
                 if path.exists():
-                    with open(path, 'r') as f:
-                        key = f.read().strip()
-                        logger.info(f"✅ Loaded Desktop Agent API key from {path}")
+                    key = path.read_text().strip()
+                    if key:
+                        logger.debug(f"Loaded Desktop Agent API key from {path}")
                         return key
             except Exception as e:
                 logger.debug(f"Could not read API key from {path}: {e}")
         
-        # Try environment variable
-        if os.environ.get("DESKTOP_AGENT_API_KEY"):
-            logger.info("✅ Using API key from environment variable")
-            return os.environ.get("DESKTOP_AGENT_API_KEY")
-        
-        # Default key for testing (not secure!)
-        logger.warning("⚠️ Using default API key - update for production!")
+        logger.warning("⚠️ Could not load Desktop Agent API key from any source")
         return "default-key-change-me"
     
     async def execute_skill(
@@ -105,7 +113,7 @@ class DesktopBridgeSkill:
         try:
             async with aiohttp.ClientSession(timeout=self.timeout) as session:
                 headers = {
-                    "X-API-Key": self.api_key,
+                    "X-API-Key": self._get_api_key(),
                     "Content-Type": "application/json"
                 }
                 
@@ -190,7 +198,7 @@ class DesktopBridgeSkill:
         """Get list of available desktop skills"""
         try:
             async with aiohttp.ClientSession(timeout=self.timeout) as session:
-                headers = {"X-API-Key": self.api_key}
+                headers = {"X-API-Key": self._get_api_key()}
                 async with session.get(
                     f"{self.desktop_agent_url}/skills",
                     headers=headers

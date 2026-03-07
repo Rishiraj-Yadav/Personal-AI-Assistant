@@ -105,14 +105,24 @@ class CodeSpecialistAgent:
             # Detect project type and configuration
             project_config = self._detect_project_config(parse_result["files"])
 
+            # Parse project name from LLM output
+            project_name = "generated_project"
+            name_match = re.search(r'PROJECT_NAME:\s*(.+)', code_output, re.IGNORECASE)
+            if name_match:
+                project_name = name_match.group(1).strip().lower().replace(' ', '-')
+                # Sanitize: keep only alphanumeric, dash, underscore
+                project_name = re.sub(r'[^a-z0-9_\-]', '', project_name) or "generated_project"
+
             logger.info(f"✅ Generated {len(parse_result['files'])} files")
             logger.info(f"📦 Project type: {project_config['project_type']}")
+            logger.info(f"📁 Project name: {project_name}")
 
             return {
                 "success": True,
                 "files": parse_result["files"],
                 "structure": parse_result["structure"],
                 "main_file": parse_result["main_file"],
+                "project_name": project_name,
                 "project_type": project_config["project_type"],
                 "language": project_config["language"],
                 "is_server": project_config["is_server"],

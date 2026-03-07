@@ -37,13 +37,22 @@ class EnhancedSandboxService:
     ) -> Dict[str, Any]:
         """Execute complete multi-file project in E2B with correct URL format"""
 
+        # STEP 0: Always save files locally first, regardless of E2B availability
+        project_path = ""
+        try:
+            project_path = self._save_to_workspace(files, project_name)
+            logger.info(f"💾 Saved project to local workspace: {project_path}")
+        except Exception as save_err:
+            logger.error(f"❌ Failed to save project locally: {save_err}")
+
         if not self.api_key:
             return {
-                "success": False,
-                "error": "E2B_API_KEY not set",
-                "stdout": "",
-                "stderr": "E2B_API_KEY not configured",
-                "exit_code": 1
+                "success": True,
+                "error": None,
+                "stdout": f"Project saved to: {project_path}\n(E2B sandbox not configured - files saved locally only)",
+                "stderr": "",
+                "exit_code": 0,
+                "project_path": project_path
             }
 
         sandbox = None
@@ -55,11 +64,7 @@ class EnhancedSandboxService:
             sandbox_id = getattr(sandbox, 'sandbox_id', 'unknown')
             logger.info(f"✅ Sandbox created: {sandbox_id}")
 
-            # STEP 1: Save files to LOCAL workspace FIRST
-            project_path = self._save_to_workspace(files, project_name)
-            logger.info(f"💾 Saved project to: {project_path}")
-
-            # STEP 2: Create files in E2B sandbox
+            # STEP 1: Create files in E2B sandbox
             logger.info(f"📁 Creating {len(files)} project files in sandbox...")
             for filepath, content in files.items():
                 self._create_file_in_sandbox(sandbox, filepath, content)
@@ -111,7 +116,8 @@ class EnhancedSandboxService:
                 "error": str(e),
                 "stdout": "",
                 "stderr": str(e),
-                "exit_code": 1
+                "exit_code": 1,
+                "project_path": project_path
             }
         
         finally:

@@ -1,9 +1,9 @@
 #!/bin/bash
 
-# OpenClaw Agent - Workspace Setup Helper
+# SonarBot - Workspace Setup Helper
 # This script helps you configure where files are created
 
-echo "🗂️  OpenClaw Agent - Workspace Configuration"
+echo "🗂️  SonarBot - Workspace Configuration"
 echo "=============================================="
 echo ""
 

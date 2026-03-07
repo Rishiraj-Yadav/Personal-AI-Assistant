@@ -5,6 +5,7 @@ Security and behavior settings
 from pydantic_settings import BaseSettings
 from typing import List
 import secrets
+import os
 
 
 class DesktopAgentSettings(BaseSettings):
@@ -13,7 +14,8 @@ class DesktopAgentSettings(BaseSettings):
     # Server settings
     HOST: str = "127.0.0.1"  # Only localhost for security
     PORT: int = 7777
-    API_KEY: str = secrets.token_urlsafe(32)  # Auto-generated secret
+    # API_KEY loaded from .env (API_KEY=...) or auto-generated
+    API_KEY: str = ""
     
     # Safety settings
     SAFE_MODE: bool = False  # True = log only, don't execute
@@ -80,7 +82,18 @@ class DesktopAgentSettings(BaseSettings):
 
 
 # Global settings instance
-settings = DesktopAgentSettings()
+_settings = DesktopAgentSettings()
+
+# If no API_KEY was loaded from env/.env, auto-generate one
+if not _settings.API_KEY:
+    # Check DESKTOP_AGENT_API_KEY env var as fallback
+    _desktop_key = os.environ.get("DESKTOP_AGENT_API_KEY", "").strip()
+    if _desktop_key:
+        _settings.API_KEY = _desktop_key
+    else:
+        _settings.API_KEY = secrets.token_urlsafe(32)
+
+settings = _settings
 
 
 # Save API key to file for backend to use

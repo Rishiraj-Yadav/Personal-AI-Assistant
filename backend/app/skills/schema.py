@@ -105,7 +105,7 @@ class SkillManifest(BaseModel):
             "example": {
                 "name": "web_scraper",
                 "version": "0.1.0",
-                "author": "openclaw@example.com",
+                "author": "sonarbot@example.com",
                 "description": "Scrapes content from web pages",
                 "permissions": ["network.external", "browser.automate"],
                 "parameters": [

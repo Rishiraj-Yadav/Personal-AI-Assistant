@@ -1,21 +1,26 @@
 """
-Context Builder - Combines Structured + Semantic Memory
-Builds rich context for AI agents
+Context Builder - Combines Structured (SQL) + Semantic (Qdrant) Memory
+Builds rich, cross-conversation context for AI agents in SonarBot
+
+KEY FIX: Loads context across ALL conversations, not just the current one.
+This ensures memory persists across new chats and system restarts.
 """
 from typing import Dict, List, Optional
 from loguru import logger
 
-from app.services.memory_service import memory_service
+from app.services.enhanced_memory_service import enhanced_memory_service
 from app.services.vector_memory_service import vector_memory
 
 
 class ContextBuilder:
     """
-    Builds comprehensive context from multiple memory sources
+    Builds comprehensive context from multiple memory sources:
+    1. SQL: User profile, preferences, conversation history
+    2. Qdrant: Semantic search across ALL past conversations + user insights
     """
     
     def __init__(self):
-        self.sql_memory = memory_service
+        self.sql_memory = enhanced_memory_service
         self.vector_memory = vector_memory
         logger.info("✅ Context Builder initialized")
     
@@ -27,44 +32,38 @@ class ContextBuilder:
         task_type: Optional[str] = None
     ) -> str:
         """
-        Build complete context for agent
+        Build complete context for agent from ALL memory sources.
         
-        Combines:
-        - User profile (SQL)
-        - Learned preferences (SQL)
-        - Recent conversation (SQL)
-        - Semantically similar past conversations (Vector)
-        - Relevant insights (Vector)
+        This context persists across:
+        - New chats (via vector search across all conversations)
+        - System restarts (Qdrant + SQLite both persist to disk)
         
-        Args:
-            user_id: User identifier
-            current_message: Current user message
-            conversation_id: Current conversation
-            task_type: Optional task type for filtering
-            
         Returns:
             Formatted context string for LLM system prompt
         """
         context_parts = []
         
-        # === 1. USER PROFILE (Structured) ===
+        # === 1. USER FACTS FROM QDRANT (persistent across all chats) ===
+        facts_context = self._build_user_facts_context(user_id)
+        if facts_context:
+            context_parts.append(facts_context)
+        
+        # === 2. USER PROFILE & STATS (SQL) ===
         profile_context = self._build_profile_context(user_id)
         if profile_context:
             context_parts.append(profile_context)
         
-        # === 2. LEARNED PREFERENCES (Structured) ===
+        # === 3. LEARNED PREFERENCES (SQL) ===
         preferences_context = self._build_preferences_context(user_id, task_type)
         if preferences_context:
             context_parts.append(preferences_context)
         
-        # === 3. SEMANTIC MEMORY (Vector) ===
+        # === 4. SEMANTIC MEMORY - Similar past conversations (Qdrant) ===
         semantic_context = self._build_semantic_context(user_id, current_message)
         if semantic_context:
             context_parts.append(semantic_context)
         
-        # === 4. RECENT CONVERSATION (Structured) ===
-        # This will be added separately as message history
-        # We just note it exists
+        # === 5. CURRENT CONVERSATION HISTORY (SQL) ===
         recent_messages = self.sql_memory.get_conversation_history(
             conversation_id, limit=5
         )
@@ -75,6 +74,11 @@ class ContextBuilder:
                 f"- Continue naturally from this context"
             )
         
+        # === 6. CROSS-CONVERSATION RECENT HISTORY ===
+        cross_conv_context = self._build_cross_conversation_context(user_id, conversation_id)
+        if cross_conv_context:
+            context_parts.append(cross_conv_context)
+        
         # Combine all context
         if context_parts:
             full_context = "\n\n".join(context_parts)
@@ -82,20 +86,67 @@ class ContextBuilder:
 
 {full_context}
 
-Use this context to provide personalized, contextaware responses.
-Reference past discussions when relevant.
-Build on user's known preferences.
+IMPORTANT INSTRUCTIONS:
+- Use this context to provide personalized, context-aware responses.
+- Reference past discussions and known facts when relevant.
+- Build on user's known preferences.
+- If you know the user's name, use it naturally.
+- All context above persists across conversations - the user expects you to remember.
 """
         else:
             return ""
     
-    def _build_profile_context(self, user_id: str) -> str:
-        """Build user profile context"""
+    def _build_user_facts_context(self, user_id: str) -> str:
+        """Build context from extracted user facts (from Qdrant insights)"""
         try:
-            # Get user stats from SQL
-            recent_convs = self.sql_memory.get_recent_conversations(user_id, limit=5)
+            all_insights = self.vector_memory.get_all_user_insights(user_id, limit=30)
             
-            # Get vector memory stats
+            if not all_insights:
+                return ""
+            
+            # Deduplicate and organize insights
+            user_facts = []
+            preferences = []
+            seen_content = set()
+            
+            for insight in all_insights:
+                content = insight.get('content', '')
+                # Simple dedup by content similarity
+                content_key = content.lower().strip()[:80]
+                if content_key in seen_content:
+                    continue
+                seen_content.add(content_key)
+                
+                itype = insight.get('type', '')
+                if itype == 'user_fact':
+                    user_facts.append(content)
+                elif itype == 'preference':
+                    preferences.append(content)
+            
+            context_parts = []
+            
+            if user_facts:
+                context_parts.append("# KNOWN FACTS ABOUT THIS USER:")
+                for fact in user_facts[:10]:
+                    context_parts.append(f"- {fact}")
+            
+            if preferences:
+                context_parts.append("\n# USER PREFERENCES (from past conversations):")
+                for pref in preferences[:10]:
+                    context_parts.append(f"- {pref}")
+            
+            if context_parts:
+                return "\n".join(context_parts)
+            return ""
+        
+        except Exception as e:
+            logger.error(f"Error building user facts context: {e}")
+            return ""
+    
+    def _build_profile_context(self, user_id: str) -> str:
+        """Build user profile context from SQL"""
+        try:
+            recent_convs = self.sql_memory.get_recent_conversations(user_id, limit=10)
             vector_stats = self.vector_memory.get_stats(user_id)
             
             if not recent_convs and vector_stats['total_messages'] == 0:
@@ -107,6 +158,9 @@ Build on user's known preferences.
                 total_messages = sum(c['message_count'] for c in recent_convs)
                 context += f"- Total conversations: {len(recent_convs)}\n"
                 context += f"- Total messages exchanged: {total_messages}\n"
+            
+            if vector_stats['total_messages'] > 0:
+                context += f"- Semantic memories stored: {vector_stats['total_messages']}\n"
             
             if vector_stats['total_insights'] > 0:
                 context += f"- Learned insights: {vector_stats['total_insights']}\n"
@@ -129,14 +183,12 @@ Build on user's known preferences.
             if not prefs:
                 return ""
             
-            context = "# LEARNED PREFERENCES:\n"
+            context = "# LEARNED PREFERENCES (SQL):\n"
             
-            # Filter by task type if specified
             if task_type:
                 category = task_type.split('_')[0]
                 prefs = {category: prefs.get(category, {})}
             
-            # Build context
             for category, items in prefs.items():
                 if not items:
                     continue
@@ -168,9 +220,8 @@ Build on user's known preferences.
         user_id: str,
         current_message: str
     ) -> str:
-        """Build semantic context from vector memory"""
+        """Build semantic context from vector memory (cross-conversation)"""
         try:
-            # Get semantic context
             semantic_data = self.vector_memory.get_user_context(
                 user_id=user_id,
                 current_query=current_message,
@@ -180,20 +231,33 @@ Build on user's known preferences.
             
             context_parts = []
             
-            # Add similar past messages
+            # Add similar past messages/exchanges
             if semantic_data['similar_messages']:
-                context_parts.append("# RELEVANT PAST DISCUSSIONS:")
-                for msg in semantic_data['similar_messages'][:3]:
+                context_parts.append("# RELEVANT PAST DISCUSSIONS (from any conversation):")
+                for msg in semantic_data['similar_messages'][:5]:
                     similarity = int(msg['similarity_score'] * 100)
-                    content_preview = msg['content'][:80] + "..."
-                    context_parts.append(
-                        f"- ({similarity}% similar) \"{content_preview}\""
-                    )
+                    role = msg.get('role', 'user')
+                    
+                    if role == 'exchange':
+                        # This is a full exchange pair - most useful
+                        user_msg = msg.get('user_message', '')
+                        asst_resp = msg.get('assistant_response', '')
+                        if user_msg and asst_resp:
+                            context_parts.append(
+                                f"- ({similarity}% relevant) Previous exchange:\n"
+                                f"  User: \"{user_msg[:100]}\"\n"
+                                f"  Assistant: \"{asst_resp[:150]}\""
+                            )
+                    else:
+                        content_preview = msg['content'][:120]
+                        context_parts.append(
+                            f"- ({similarity}% similar, {role}) \"{content_preview}\""
+                        )
             
             # Add relevant insights
             if semantic_data['insights']:
-                context_parts.append("\n# RELEVANT INSIGHTS:")
-                for insight in semantic_data['insights']:
+                context_parts.append("\n# QUERY-RELEVANT INSIGHTS:")
+                for insight in semantic_data['insights'][:5]:
                     similarity = int(insight['similarity_score'] * 100)
                     context_parts.append(
                         f"- ({similarity}% relevant) {insight['content']}"
@@ -208,84 +272,50 @@ Build on user's known preferences.
             logger.error(f"Error building semantic context: {e}")
             return ""
     
-    def save_message_with_context(
+    def _build_cross_conversation_context(
         self,
         user_id: str,
-        message_id: int,
-        conversation_id: str,
-        role: str,
-        content: str,
-        metadata: Dict = None
-    ):
-        """
-        Save message to both SQL and vector databases
-        
-        Args:
-            user_id: User identifier
-            message_id: Message ID from SQL database
-            conversation_id: Conversation ID
-            role: 'user' or 'assistant'
-            content: Message content
-            metadata: Additional metadata
-        """
-        # Save to vector memory
-        self.vector_memory.store_message(
-            user_id=user_id,
-            message_id=message_id,
-            conversation_id=conversation_id,
-            role=role,
-            content=content,
-            metadata=metadata
-        )
-    
-    def extract_and_save_insights(
-        self,
-        user_id: str,
-        conversation_id: str
-    ):
-        """
-        Extract insights from recent conversation
-        
-        Should be called periodically (e.g., every 5 messages)
-        
-        Args:
-            user_id: User identifier
-            conversation_id: Conversation to analyze
-        """
+        current_conversation_id: str
+    ) -> str:
+        """Build context from recent messages across OTHER conversations"""
         try:
-            # Get recent messages
-            messages = self.sql_memory.get_conversation_history(
-                conversation_id, limit=10
-            )
+            recent_convs = self.sql_memory.get_recent_conversations(user_id, limit=5)
             
-            if not messages:
-                return
+            if not recent_convs:
+                return ""
             
-            # Extract and store insights
-            self.vector_memory.extract_and_store_insights(
-                user_id=user_id,
-                conversation_messages=messages
-            )
+            other_convs = [
+                c for c in recent_convs 
+                if c['conversation_id'] != current_conversation_id
+            ]
             
-            logger.debug(f"🧠 Extracted insights from conversation {conversation_id}")
+            if not other_convs:
+                return ""
+            
+            context_parts = ["# RECENT CONVERSATION TOPICS:"]
+            for conv in other_convs[:3]:
+                title = conv.get('title', 'Unknown topic')[:80]
+                msg_count = conv.get('message_count', 0)
+                context_parts.append(f"- \"{title}\" ({msg_count} messages)")
+            
+            return "\n".join(context_parts)
         
         except Exception as e:
-            logger.error(f"Error extracting insights: {e}")
+            logger.error(f"Error building cross-conversation context: {e}")
+            return ""
     
     def get_memory_summary(self, user_id: str) -> Dict:
         """Get summary of all memory for user"""
         try:
-            # SQL memory stats
             prefs = self.sql_memory.get_user_preferences(user_id)
             recent_convs = self.sql_memory.get_recent_conversations(user_id, limit=10)
-            
-            # Vector memory stats
             vector_stats = self.vector_memory.get_stats(user_id)
             
             return {
                 'sql_memory': {
                     'total_preferences': sum(
-                        len(items) for items in prefs.values()
+                        len(items) for category_items in prefs.values() 
+                        for items in category_items.values()
                     ) if prefs else 0,
                     'total_conversations': len(recent_convs),
                     'total_messages': sum(

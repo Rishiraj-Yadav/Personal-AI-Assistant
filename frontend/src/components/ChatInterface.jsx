@@ -6,7 +6,7 @@ import { getUserId, getUserName, setUserName, hasUserName } from '../utils/userI
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1'
 
 // ✅ Store conversation ID in localStorage
-const CONVERSATION_ID_KEY = 'openclaw_conversation_id';
+const CONVERSATION_ID_KEY = 'sonarbot_conversation_id';
 
 function ChatInterface() {
   const [messages, setMessages] = useState([])
@@ -216,7 +216,7 @@ function ChatInterface() {
     return (
       <div className="name-prompt-modal">
         <div className="name-prompt-content">
-          <h2>👋 Welcome to OpenClaw!</h2>
+          <h2>👋 Welcome to SonarBot!</h2>
           <p>What should I call you? (Optional)</p>
           <form onSubmit={(e) => {
             e.preventDefault()

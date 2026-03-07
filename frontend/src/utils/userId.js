@@ -3,8 +3,8 @@
  * Stores user ID in localStorage for memory persistence
  */
 
-const USER_ID_KEY = 'openclaw_user_id';
-const USER_NAME_KEY = 'openclaw_user_name';
+const USER_ID_KEY = 'sonarbot_user_id';
+const USER_NAME_KEY = 'sonarbot_user_name';
 
 /**
  * Get or create user ID

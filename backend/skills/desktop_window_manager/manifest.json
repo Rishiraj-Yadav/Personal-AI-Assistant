@@ -1,7 +1,7 @@
 {
   "name": "desktop_window_manager",
   "version": "1.0.0",
-  "author": "openclaw@example.com",
+  "author": "sonarbot@example.com",
   "description": "Manages desktop windows",
   "permissions": ["desktop.window"],
   "parameters": [

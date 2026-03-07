@@ -68,7 +68,7 @@ function MessageList({ messages, isLoading }) {
 
 {messages.length === 0 && !isLoading && (
   <div className="welcome-message">
-    <h2>👋 Welcome to OpenClaw Smart Agent!</h2>
+    <h2>👋 Welcome to SonarBot!</h2>
     <p>I automatically detect what you need - just ask naturally!</p>
     
     <div className="feature-cards">

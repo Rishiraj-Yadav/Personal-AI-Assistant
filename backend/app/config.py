@@ -1,5 +1,5 @@
 """
-Configuration management for OpenClaw Agent
+Configuration management for SonarBot
 """
 from pydantic_settings import BaseSettings
 from typing import Optional
@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables"""
     
     # Application
-    APP_NAME: str = "OpenClaw Agent"
+    APP_NAME: str = "SonarBot"
     APP_VERSION: str = "0.2.0"  # Updated for desktop automation
     DEBUG: bool = False
     

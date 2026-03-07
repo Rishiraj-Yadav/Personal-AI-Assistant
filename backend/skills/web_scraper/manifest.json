@@ -1,7 +1,7 @@
 {
   "name": "web_scraper",
   "version": "0.1.0",
-  "author": "openclaw@example.com",
+  "author": "sonarbot@example.com",
   "description": "Scrapes text content, title, and meta information from any web page URL",
   "permissions": [
     "network.external",

@@ -54,3 +54,13 @@ build/
 
 # Keep this README
 !README.md
+
+qdrant_storage/
+.qdrant_storage
+*.qdrant_storage
+
+
+# Qdrant database storage
+qdrant_storage/
+
+backend/data/

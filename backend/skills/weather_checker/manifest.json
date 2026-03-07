@@ -1,7 +1,7 @@
 {
   "name": "weather_checker",
   "version": "0.1.0",
-  "author": "openclaw@example.com",
+  "author": "sonarbot@example.com",
   "description": "Checks current weather for a given city using wttr.in",
   "permissions": [
     "network.external"

@@ -1,4 +1,4 @@
-# Frontend Dockerfile for OpenClaw Agent
+# Frontend Dockerfile for SonarBot
 FROM node:20-alpine
 
 # Set working directory
