@@ -126,3 +126,46 @@ class BehavioralPattern(Base):
     
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     last_occurrence = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class GoogleOAuthToken(Base):
+    """Stores Google OAuth tokens per user (Gmail + Calendar access)"""
+    __tablename__ = 'google_oauth_tokens'
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String(255), ForeignKey('users.user_id', ondelete='CASCADE'), unique=True)
+    
+    access_token = Column(Text)
+    refresh_token = Column(Text)
+    token_uri = Column(String(500), default="https://oauth2.googleapis.com/token")
+    scopes = Column(JSON)
+    expiry = Column(DateTime, nullable=True)
+    
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    
+    user = relationship("User", backref="google_token")
+
+
+class ScheduledJob(Base):
+    """Persisted scheduled jobs (reminders, recurring tasks)"""
+    __tablename__ = 'scheduled_jobs'
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String(255), ForeignKey('users.user_id', ondelete='CASCADE'))
+    
+    job_id = Column(String(255), unique=True)  # APScheduler job ID
+    job_type = Column(String(50))  # 'reminder', 'email_check', 'calendar_check'
+    description = Column(Text)
+    
+    # Schedule config
+    trigger_type = Column(String(20))  # 'cron', 'interval', 'date'
+    trigger_args = Column(JSON)  # {"hour": 9, "minute": 0} etc.
+    
+    # Action to perform
+    action_type = Column(String(50))  # 'send_email', 'check_email', 'notify'
+    action_data = Column(JSON)
+    
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    next_run = Column(DateTime, nullable=True)

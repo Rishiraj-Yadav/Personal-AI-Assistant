@@ -39,6 +39,14 @@ langgraph>=0.2.0,<0.3.0
 # ── Database ──────────────────────────────────────────────────────────
 sqlalchemy>=2.0.25,<2.1.0
 
+# ── Google APIs (Gmail + Calendar) ────────────────────────────────────
+google-auth>=2.27.0,<3.0.0
+google-auth-oauthlib>=1.2.0,<2.0.0
+google-api-python-client>=2.114.0,<3.0.0
+
+# ── Scheduler (Cron Jobs / Reminders) ─────────────────────────────────
+apscheduler>=3.10.4,<4.0.0
+
 # ── Utilities ─────────────────────────────────────────────────────────
 python-dotenv>=1.0.0,<2.0.0
 cachetools>=5.3.2,<6.0.0

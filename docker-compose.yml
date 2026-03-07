@@ -14,6 +14,9 @@ services:
       - DESKTOP_AGENT_API_KEY=${DESKTOP_AGENT_API_KEY:-}
       # ✅ CRITICAL FIX: Qdrant URL (use service name 'qdrant', NOT 'localhost'!)
       - QDRANT_URL=http://qdrant:6333
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+      - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI:-http://localhost:8000/api/v1/auth/google/callback}
     volumes:
       - ./backend/app:/app/app
       - ./backend/logs:/app/logs

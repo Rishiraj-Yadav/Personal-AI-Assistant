@@ -86,6 +86,9 @@ body {
   padding: 15px 20px;
   border-bottom: 1px solid #e2e8f0;
   background: #f7fafc;
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .btn-clear {
@@ -107,6 +110,36 @@ body {
 .btn-clear:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* Google Connect Button */
+.btn-google {
+  background: #4285f4;
+  color: white;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  transition: all 0.2s;
+}
+
+.btn-google:hover {
+  background: #3367d6;
+  transform: translateY(-1px);
+}
+
+.btn-google.connected {
+  background: #34a853;
+}
+
+.btn-google.connected:hover {
+  background: #c53030;
+}
+
+.btn-google.connected:hover::after {
+  content: ' (Disconnect)';
 }
 
 /* Error Message */

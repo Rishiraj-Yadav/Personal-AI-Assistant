@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     # Desktop Agent URL
     DESKTOP_AGENT_URL: str = "http://localhost:7777"
     
+    # Google OAuth (Gmail + Calendar)
+    GOOGLE_CLIENT_ID: str = ""
+    GOOGLE_CLIENT_SECRET: str = ""
+    GOOGLE_REDIRECT_URI: str = "http://localhost:8000/api/v1/auth/google/callback"
+    
     # System Prompt with Desktop Skills
     SYSTEM_PROMPT: str = """You are a helpful AI assistant with access to various skills and tools, including DESKTOP AUTOMATION capabilities.
 

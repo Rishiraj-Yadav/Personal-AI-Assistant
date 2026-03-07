@@ -201,9 +201,12 @@ function MessageList({ messages, isLoading }) {
 
               {message.metadata.agent_path && message.metadata.agent_path.length > 0 && (
                 <div className="agent-path">
-                  <span className="agent-path-label">🤖 Agents used:</span>
-                  {message.metadata.agent_path.map((agent, i) => (
-                    <span key={i} className="agent-badge">{agent}</span>
+                  <span className="agent-path-label">🤖 Agents:</span>
+                  {[...new Set(message.metadata.agent_path)].map((agent, i, arr) => (
+                    <span key={i}>
+                      <span className="agent-badge">{agent}</span>
+                      {i < arr.length - 1 && <span className="agent-arrow"> → </span>}
+                    </span>
                   ))}
                 </div>
               )}

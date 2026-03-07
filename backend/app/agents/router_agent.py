@@ -52,8 +52,16 @@ Analyze this request and classify it into ONE category:
 3. WEB - Scrape websites, get weather, fetch data
    Triggers: "scrape", "website", "URL", "weather", "fetch", "download", "browse"
    Examples: "scrape example.com", "what's the weather", "get data from URL"
-   
-4. GENERAL - Questions, conversations, explanations, unclear requests
+
+4. EMAIL - Gmail operations: read, send, compose, search, draft emails
+   Triggers: "email", "mail", "inbox", "send email", "compose", "unread", "gmail"
+   Examples: "check my email", "send email to john", "read my inbox", "search emails from boss", "any unread emails?"
+
+5. CALENDAR - Google Calendar: events, schedule, meetings, reminders
+   Triggers: "calendar", "schedule", "meeting", "event", "appointment", "remind", "reminder", "what's on"
+   Examples: "what's on my calendar today", "schedule a meeting", "set a reminder", "create event tomorrow 3pm"
+
+6. GENERAL - Questions, conversations, explanations, unclear requests
    Triggers: Everything else
    Examples: "how are you", "explain quantum physics", "what can you do"
 
@@ -61,10 +69,12 @@ IMPORTANT RULES:
 - If user mentions code/programming/app/API → CODING
 - If user mentions file paths like "R:/..." → CODING (they want to work with files)
 - If user says "create", "make", "build" + tech term → CODING
+- If user mentions email/mail/inbox/compose/send email → EMAIL
+- If user mentions calendar/schedule/meeting/event/reminder → CALENDAR
 - Be decisive! Coding is the most common task.
 
 Respond EXACTLY in this format:
-TASK_TYPE: [coding/desktop/web/general]
+TASK_TYPE: [coding/desktop/web/email/calendar/general]
 CONFIDENCE: [0.0-1.0]
 REASONING: [Brief explanation]
 
@@ -110,6 +120,8 @@ Classify now:"""
             "coding": "code_specialist",
             "desktop": "desktop_specialist",
             "web": "web_specialist",
+            "email": "email_specialist",
+            "calendar": "calendar_specialist",
             "general": "general_assistant"
         }
         return routing_map.get(task_type, "general_assistant")
@@ -137,6 +149,18 @@ Classify now:"""
             "scrape", "website", "url", "weather", "fetch", "download"
         ]
         
+        # Email keywords
+        email_keywords = [
+            "email", "mail", "inbox", "compose", "send email", "draft",
+            "unread", "gmail", "send mail"
+        ]
+        
+        # Calendar keywords
+        calendar_keywords = [
+            "calendar", "schedule", "meeting", "event", "appointment",
+            "remind", "reminder", "what's on"
+        ]
+        
         # Check keywords
         if any(kw in message_lower for kw in coding_keywords):
             return {
@@ -144,6 +168,22 @@ Classify now:"""
                 "confidence": 0.75,
                 "reasoning": "Matched coding keywords",
                 "next_agent": "code_specialist"
+            }
+        
+        if any(kw in message_lower for kw in email_keywords):
+            return {
+                "task_type": "email",
+                "confidence": 0.80,
+                "reasoning": "Matched email keywords",
+                "next_agent": "email_specialist"
+            }
+        
+        if any(kw in message_lower for kw in calendar_keywords):
+            return {
+                "task_type": "calendar",
+                "confidence": 0.80,
+                "reasoning": "Matched calendar keywords",
+                "next_agent": "calendar_specialist"
             }
         
         if any(kw in message_lower for kw in desktop_keywords):

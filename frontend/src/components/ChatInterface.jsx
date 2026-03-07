@@ -16,6 +16,7 @@ function ChatInterface() {
   const [progress, setProgress] = useState(null)
   const [userId] = useState(getUserId())
   const [showNamePrompt, setShowNamePrompt] = useState(!hasUserName())
+  const [googleConnected, setGoogleConnected] = useState(false)
   
   // ✅ Load conversation ID from localStorage on mount
   const [conversationId, setConversationId] = useState(() => {
@@ -62,6 +63,46 @@ function ChatInterface() {
         localStorage.removeItem(CONVERSATION_ID_KEY)
         setConversationId(null)
       }
+    }
+  }
+
+  // ✅ Check Google connection status
+  const checkGoogleStatus = async () => {
+    try {
+      const response = await axios.get(`${API_BASE_URL}/auth/google/status?user_id=${userId}`)
+      setGoogleConnected(response.data.connected)
+    } catch (err) {
+      console.warn('Could not check Google status:', err)
+    }
+  }
+
+  useEffect(() => {
+    checkGoogleStatus()
+    // Handle OAuth callback redirect
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('google_connected') === 'true') {
+      setGoogleConnected(true)
+      window.history.replaceState({}, '', window.location.pathname)
+    }
+  }, [])
+
+  const connectGoogle = async () => {
+    try {
+      const response = await axios.get(`${API_BASE_URL}/auth/google/connect?user_id=${userId}`)
+      if (response.data.auth_url) {
+        window.location.href = response.data.auth_url
+      }
+    } catch (err) {
+      setError('Failed to start Google connection. Please try again.')
+    }
+  }
+
+  const disconnectGoogle = async () => {
+    try {
+      await axios.post(`${API_BASE_URL}/auth/google/disconnect`, { user_id: userId })
+      setGoogleConnected(false)
+    } catch (err) {
+      setError('Failed to disconnect Google account.')
     }
   }
 
@@ -261,6 +302,16 @@ function ChatInterface() {
         >
           🗑️ New Chat
         </button>
+
+        {googleConnected ? (
+          <button onClick={disconnectGoogle} className="btn-google connected" title="Google account connected">
+            ✅ Google Connected
+          </button>
+        ) : (
+          <button onClick={connectGoogle} className="btn-google" title="Connect Gmail & Calendar">
+            🔗 Connect Google
+          </button>
+        )}
 
         <div className="user-info">
           <span className="user-name">

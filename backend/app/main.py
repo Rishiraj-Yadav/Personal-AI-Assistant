@@ -28,12 +28,19 @@ async def lifespan(app: FastAPI):
     init_db()  # ✅ Create tables
     logger.info("✅ Database initialized")
     
+    # Start scheduler
+    from app.services.scheduler_service import scheduler_service
+    scheduler_service.start()
+    logger.info("✅ Scheduler started")
+    
     # Create logs directory if it doesn't exist
     os.makedirs("logs", exist_ok=True)
     
     yield
     
     # Shutdown
+    from app.services.scheduler_service import scheduler_service as sched
+    sched.shutdown()
     logger.info(f"Shutting down {settings.APP_NAME}")
 
 

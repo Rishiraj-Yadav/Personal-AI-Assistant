@@ -9,7 +9,9 @@ from app.database.models import (
     Conversation,
     Message,
     TaskHistory,
-    BehavioralPattern
+    BehavioralPattern,
+    GoogleOAuthToken,
+    ScheduledJob
 )
 
 __all__ = [
@@ -23,5 +25,7 @@ __all__ = [
     'Conversation',
     'Message',
     'TaskHistory',
-    'BehavioralPattern'
+    'BehavioralPattern',
+    'GoogleOAuthToken',
+    'ScheduledJob'
 ]

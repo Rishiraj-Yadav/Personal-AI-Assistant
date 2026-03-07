@@ -193,6 +193,13 @@
   border-radius: 12px;
   font-size: 0.75rem;
   font-weight: 500;
+  margin: 2px 4px;
+}
+
+.agent-arrow {
+  color: #6a1b9a;
+  font-size: 0.85rem;
+  font-weight: 600;
 }
 
 /* Mode Cards (Welcome Screen) */
