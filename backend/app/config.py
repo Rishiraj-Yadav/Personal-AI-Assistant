@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     
     # Application
     APP_NAME: str = "SonarBot"
-    APP_VERSION: str = "0.2.0"  # Updated for desktop automation
+    APP_VERSION: str = "0.4.0"  # Permission system, virtual desktop, threads, dashboard
     DEBUG: bool = False
     
     # Server
@@ -36,6 +36,20 @@ class Settings(BaseSettings):
     GOOGLE_CLIENT_ID: str = ""
     GOOGLE_CLIENT_SECRET: str = ""
     GOOGLE_REDIRECT_URI: str = "http://localhost:8000/api/v1/auth/google/callback"
+    
+    # Google Gemini (fallback LLM)
+    GOOGLE_API_KEY: str = ""
+    
+    # Discord Bot
+    DISCORD_BOT_TOKEN: str = ""
+    
+    # Dashboard
+    DASHBOARD_BASE_URL: str = "http://localhost:8000"
+    
+    # Virtual Desktop
+    VIRTUAL_DESKTOP_TIMEOUT: int = 600  # seconds
+    VIRTUAL_DESKTOP_MAX_SESSIONS: int = 5
+    VIRTUAL_DESKTOP_RESOLUTION: str = "1280x720x24"
     
     # System Prompt with Desktop Skills
     SYSTEM_PROMPT: str = """You are a helpful AI assistant with access to various skills and tools, including DESKTOP AUTOMATION capabilities.

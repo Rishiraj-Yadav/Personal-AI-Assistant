@@ -11,6 +11,7 @@ from app.database.models import (
     TaskHistory,
     BehavioralPattern,
     GoogleOAuthToken,
+    UserPermission,
     ScheduledJob
 )
 
@@ -27,5 +28,6 @@ __all__ = [
     'TaskHistory',
     'BehavioralPattern',
     'GoogleOAuthToken',
+    'UserPermission',
     'ScheduledJob'
 ]

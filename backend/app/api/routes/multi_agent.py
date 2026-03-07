@@ -1,5 +1,5 @@
 """
-Multi-Agent API Routes - Enhanced with LangGraph + Memory
+Multi-Agent API Routes - Enhanced with LangGraph + Memory + Slash Commands
 """
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 from app.agents.langgraph_orchestrator import langgraph_orchestrator
 from app.services.enhanced_memory_service import enhanced_memory_service
+from app.services.slash_command_service import slash_command_service
 
 router = APIRouter()
 
@@ -45,6 +46,22 @@ async def generate_code(request: MultiAgentRequest):
     """Generate code using LangGraph multi-agent system"""
     try:
         logger.info(f"🚀 Multi-agent request: {request.message[:50]}...")
+        
+        # Handle slash commands
+        if slash_command_service.is_slash_command(request.message):
+            result = await slash_command_service.execute(
+                message=request.message,
+                user_id=request.user_id,
+                conversation_id=request.conversation_id or f"conv_{datetime.now().timestamp()}"
+            )
+            return MultiAgentResponse(
+                success=True,
+                task_type="slash_command",
+                confidence=1.0,
+                response=result.get("response", ""),
+                metadata=result.get("metadata", {}),
+                agent_path=["slash_command"]
+            )
         
         # Process through LangGraph
         result = await langgraph_orchestrator.process(
@@ -94,6 +111,29 @@ async def code_generation_stream(websocket: WebSocket):
         max_iterations = data.get("max_iterations", 3)
         
         logger.info(f"🔌 WebSocket from {user_id}: {message[:50]}...")
+        
+        # === SLASH COMMAND HANDLING ===
+        if slash_command_service.is_slash_command(message):
+            logger.info(f"⚡ Slash command: {message}")
+            result = await slash_command_service.execute(
+                message=message,
+                user_id=user_id,
+                conversation_id=conversation_id
+            )
+            await websocket.send_json({
+                "type": "complete",
+                "success": True,
+                "result": {
+                    "task_type": "slash_command",
+                    "response": result.get("response", ""),
+                    "conversation_id": conversation_id,
+                    "action": result.get("action"),
+                    "agent_path": ["slash_command"],
+                    "metadata": result.get("metadata", {})
+                },
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            })
+            return
         
         # Callback for progress updates
         async def send_to_frontend(msg_data: Dict[str, Any]):
@@ -173,6 +213,17 @@ async def code_generation_stream(websocket: WebSocket):
             })
         except:
             pass
+
+
+@router.get("/conversations")
+async def list_conversations(user_id: str):
+    """List recent conversations for sidebar"""
+    try:
+        convs = enhanced_memory_service.get_recent_conversations(user_id, limit=30)
+        return convs
+    except Exception as e:
+        logger.error(f"❌ Error listing conversations: {e}")
+        return []
 
 
 @router.get("/conversation/{conversation_id}")
@@ -264,7 +315,11 @@ async def multi_agent_health():
             "Semantic vector search",
             "Personalized context",
             "Reflection loop",
-            "Behavioral learning"
+            "Behavioral learning",
+            "Slash commands (/new, /status, /compact, /help)",
+            "Context compaction",
+            "Agent-to-agent routing",
+            "Model failover (Groq → Gemini)"
         ],
         "timestamp": datetime.now(timezone.utc).isoformat()
     }

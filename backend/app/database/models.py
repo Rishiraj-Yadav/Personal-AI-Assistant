@@ -147,6 +147,37 @@ class GoogleOAuthToken(Base):
     user = relationship("User", backref="google_token")
 
 
+class UserPermission(Base):
+    """Per-user permission tiers for agent access control"""
+    __tablename__ = 'user_permissions'
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String(255), ForeignKey('users.user_id', ondelete='CASCADE'), unique=True)
+    
+    # Permission tier: 'local' (full access), 'remote' (limited), 'admin'
+    tier = Column(String(50), default='remote')
+    
+    # Agent access (JSON list of allowed agent types)
+    # e.g. ["general", "coding", "web", "email", "calendar", "desktop"]
+    allowed_agents = Column(JSON, default=lambda: ["general", "coding", "web"])
+    
+    # Desktop access: 'none', 'virtual' (Xvfb sandbox), 'host' (real desktop)
+    desktop_access = Column(String(50), default='none')
+    
+    # Sandbox: whether code execution is sandboxed
+    sandbox_enabled = Column(Boolean, default=True)
+    
+    # Rate limiting
+    daily_message_limit = Column(Integer, default=100)
+    messages_today = Column(Integer, default=0)
+    limit_reset_at = Column(DateTime, nullable=True)
+    
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    
+    user = relationship("User", backref="permission")
+
+
 class ScheduledJob(Base):
     """Persisted scheduled jobs (reminders, recurring tasks)"""
     __tablename__ = 'scheduled_jobs'

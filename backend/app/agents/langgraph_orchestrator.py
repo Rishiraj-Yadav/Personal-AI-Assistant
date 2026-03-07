@@ -70,10 +70,10 @@ class LangGraphOrchestrator:
         logger.info("✅ LangGraph Orchestrator initialized")
     
     def _build_graph(self) -> StateGraph:
-        """Build agent graph with ALL 6 agent types"""
+        """Build agent graph with ALL 6 agent types + cross-agent routing"""
         workflow = StateGraph(AgentState)
         
-        # ALL NODES: code, desktop, web, email, calendar, general
+        # ALL NODES: code, desktop, web, email, calendar, general + cross-agent check
         workflow.add_node("load_context", self._load_context_node)
         workflow.add_node("route", self._route_node)
         workflow.add_node("code_agent", self._code_agent_node)
@@ -82,6 +82,7 @@ class LangGraphOrchestrator:
         workflow.add_node("email_agent", self._email_agent_node)
         workflow.add_node("calendar_agent", self._calendar_agent_node)
         workflow.add_node("general_agent", self._general_agent_node)
+        workflow.add_node("cross_agent_check", self._cross_agent_check_node)
         workflow.add_node("save_memory", self._save_memory_node)
         
         # Flow
@@ -102,13 +103,25 @@ class LangGraphOrchestrator:
             }
         )
         
-        # All agents → save memory → END
-        workflow.add_edge("code_agent", "save_memory")
-        workflow.add_edge("desktop_agent", "save_memory")
-        workflow.add_edge("web_agent", "save_memory")
-        workflow.add_edge("email_agent", "save_memory")
-        workflow.add_edge("calendar_agent", "save_memory")
-        workflow.add_edge("general_agent", "save_memory")
+        # All agents → cross-agent check (may chain to another agent or save)
+        workflow.add_edge("code_agent", "cross_agent_check")
+        workflow.add_edge("desktop_agent", "cross_agent_check")
+        workflow.add_edge("web_agent", "cross_agent_check")
+        workflow.add_edge("email_agent", "cross_agent_check")
+        workflow.add_edge("calendar_agent", "cross_agent_check")
+        workflow.add_edge("general_agent", "cross_agent_check")
+        
+        # Cross-agent check decides: chain to another agent or save
+        workflow.add_conditional_edges(
+            "cross_agent_check",
+            self._cross_agent_decision,
+            {
+                "calendar": "calendar_agent",
+                "email": "email_agent",
+                "done": "save_memory"
+            }
+        )
+        
         workflow.add_edge("save_memory", END)
         
         return workflow.compile()
@@ -133,15 +146,20 @@ class LangGraphOrchestrator:
                 limit=10
             )
             
-            # If this is a new conversation (no history), load recent messages
-            # from other conversations to maintain cross-chat context
-            if not history:
-                all_recent = self.memory_service.get_all_user_messages(
-                    user_id=state['user_id'],
-                    limit=10
-                )
-                if all_recent:
-                    history = all_recent[-5:]  # Last 5 messages from any conversation
+            # Always load recent cross-conversation messages for this user
+            # so Discord threads (same user, different thread IDs) share context
+            all_recent = self.memory_service.get_all_user_messages(
+                user_id=state['user_id'],
+                limit=10
+            )
+            if all_recent and not history:
+                # New thread — seed with recent user messages from other threads
+                history = all_recent[-5:]
+            elif all_recent and history:
+                # Existing thread — prepend cross-thread context before current history
+                cross_msgs = [m for m in all_recent if m.get('conversation_id') != state['conversation_id']]
+                if cross_msgs:
+                    history = cross_msgs[-3:] + history  # last 3 from other threads + current
             
             state['user_context'] = user_context
             state['conversation_history'] = history
@@ -184,8 +202,9 @@ class LangGraphOrchestrator:
         return state
     
     def _route_decision(self, state: AgentState) -> str:
-        """Route to correct agent"""
+        """Route to correct agent (with per-user permission checks)"""
         task_type = state.get('task_type', 'general')
+        user_id = state.get('user_id', '')
         
         routing_map = {
             'coding': 'coding',
@@ -197,7 +216,13 @@ class LangGraphOrchestrator:
             'general': 'general'
         }
         
-        return routing_map.get(task_type, 'general')
+        route = routing_map.get(task_type, 'general')
+        
+        # Ensure user permissions exist (auto-creates on first use)
+        from app.services.permission_service import permission_service
+        permission_service.get_permissions(user_id)
+        
+        return route
     
     async def _code_agent_node(self, state: AgentState) -> AgentState:
         """Code specialist - generates code AND saves files to workspace"""
@@ -314,9 +339,20 @@ class LangGraphOrchestrator:
         return state
     
     async def _desktop_agent_node(self, state: AgentState) -> AgentState:
-        """✅ Desktop specialist - actually executes desktop actions via desktop bridge"""
+        """Desktop specialist - routes to host desktop bridge OR virtual desktop based on permissions"""
         logger.info("🖥️ Desktop Agent processing...")
         
+        user_id = state.get('user_id', '')
+        
+        # Check desktop access tier
+        from app.services.permission_service import permission_service
+        perms = permission_service.get_permissions(user_id)
+        desktop_access = perms.get('desktop_access', 'none')
+        
+        if desktop_access == 'virtual':
+            return await self._virtual_desktop_handler(state)
+        
+        # Host desktop (default for local users)
         try:
             from app.skills.desktop_bridge import desktop_bridge
             
@@ -502,6 +538,75 @@ EXPLANATION: Opening Notepad and typing hello world"""
             state['current_output'] = f"Desktop control error: {str(e)}"
             state['final_output'] = state['current_output']
             state['errors'].append(f"Desktop agent error: {str(e)}")
+            state['success'] = False
+        
+        return state
+    
+    async def _virtual_desktop_handler(self, state: AgentState) -> AgentState:
+        """Handle desktop actions in a virtual Xvfb sandbox for remote users."""
+        logger.info("🖥️ Virtual Desktop handler for remote user...")
+        user_id = state.get('user_id', '')
+        
+        try:
+            from app.services.virtual_desktop_service import virtual_desktop_service
+            
+            session = await virtual_desktop_service.get_or_create(user_id)
+            msg_lower = state['user_message'].lower()
+            
+            # Simple action parsing for virtual desktop
+            if any(kw in msg_lower for kw in ['screenshot', 'screen shot', 'capture']):
+                result = await virtual_desktop_service.take_screenshot(user_id)
+                if result.get('success'):
+                    state['current_output'] = (
+                        f"✅ **Virtual desktop screenshot captured** (display {session.display_str})\n\n"
+                        "📸 Screenshot attached."
+                    )
+                    state['metadata'] = {
+                        'screenshot_base64': result.get('screenshot_base64', ''),
+                        'virtual_desktop': True,
+                    }
+                else:
+                    state['current_output'] = f"❌ Screenshot failed: {result.get('error', 'unknown')}"
+            elif any(kw in msg_lower for kw in ['open ', 'launch ', 'start ']):
+                for kw in ['open ', 'launch ', 'start ']:
+                    if kw in msg_lower:
+                        app_name = msg_lower.split(kw, 1)[1].strip().split()[0]
+                        break
+                result = await virtual_desktop_service.execute_in_session(
+                    user_id, f"{app_name} &"
+                )
+                state['current_output'] = (
+                    f"🖥️ **Launched `{app_name}` in your virtual desktop** (display {session.display_str})"
+                )
+            else:
+                # Generic command execution in virtual desktop
+                result = await virtual_desktop_service.execute_in_session(
+                    user_id, state['user_message']
+                )
+                stdout = result.get('stdout', '').strip()
+                stderr = result.get('stderr', '').strip()
+                output_parts = [f"🖥️ **Virtual Desktop** (display {session.display_str})"]
+                if stdout:
+                    output_parts.append(f"```\n{stdout}\n```")
+                if stderr:
+                    output_parts.append(f"**Stderr:**\n```\n{stderr}\n```")
+                if not stdout and not stderr:
+                    output_parts.append("Command executed (no output).")
+                state['current_output'] = '\n'.join(output_parts)
+            
+            state['final_output'] = state['current_output']
+            state['agent_path'].append('virtual_desktop')
+            state['success'] = True
+            
+        except RuntimeError as e:
+            # Xvfb not installed
+            state['current_output'] = f"❌ {str(e)}"
+            state['final_output'] = state['current_output']
+            state['success'] = False
+        except Exception as e:
+            logger.error(f"❌ Virtual desktop error: {e}")
+            state['current_output'] = f"Virtual desktop error: {str(e)}"
+            state['final_output'] = state['current_output']
             state['success'] = False
         
         return state
@@ -1036,6 +1141,11 @@ EXPLANATION: Brief description"""
         """General assistant"""
         logger.info("💬 General Agent processing...")
         
+        # If a security guard or rate limiter already set the output, skip processing
+        blocked_tags = {'security_guard', 'rate_limiter'}
+        if blocked_tags & set(state.get('agent_path', [])) and state.get('final_output'):
+            return state
+        
         try:
             messages = []
             
@@ -1072,6 +1182,66 @@ EXPLANATION: Brief description"""
             state['success'] = False
         
         return state
+    
+    # ===== CROSS-AGENT ROUTING =====
+    
+    async def _cross_agent_check_node(self, state: AgentState) -> AgentState:
+        """Detect if current agent's output requires another agent to act.
+        E.g., email mentions a meeting → trigger calendar agent."""
+        
+        # Only check once to avoid infinite loops
+        if state.get('metadata', {}).get('_cross_agent_done'):
+            return state
+        
+        current_output = state.get('current_output', '')
+        user_message = state.get('user_message', '').lower()
+        agent_path = state.get('agent_path', [])
+        
+        cross_target = None
+        cross_context = None
+        
+        # Email → Calendar: detect meeting/event references
+        if 'email_specialist' in agent_path and 'calendar_specialist' not in agent_path:
+            calendar_keywords = ['meeting', 'appointment', 'schedule', 'event', 'calendar',
+                                'invite', 'rsvp', 'conference', 'call at', 'session']
+            combined = f"{user_message} {current_output.lower()}"
+            if any(kw in combined for kw in calendar_keywords):
+                # Check if user explicitly wants calendar action
+                if any(phrase in user_message for phrase in [
+                    'add to calendar', 'create event', 'schedule', 'add event',
+                    'put on calendar', 'block time', 'set reminder'
+                ]):
+                    cross_target = 'calendar'
+                    cross_context = f"Based on this email context, create a calendar event: {current_output[:500]}"
+        
+        # Calendar → Email: detect "invite" or "send" in calendar context
+        if 'calendar_specialist' in agent_path and 'email_specialist' not in agent_path:
+            if any(phrase in user_message for phrase in [
+                'send invite', 'email attendees', 'notify', 'send confirmation'
+            ]):
+                cross_target = 'email'
+                cross_context = f"Send an email about this calendar event: {current_output[:500]}"
+        
+        if cross_target and cross_context:
+            logger.info(f"🔗 Cross-agent routing: → {cross_target}")
+            state['metadata'] = {**state.get('metadata', {}), '_cross_agent_done': True,
+                                 '_cross_target': cross_target, '_cross_context': cross_context}
+            # Prepend original output context so the next agent can use it
+            state['user_message'] = cross_context
+        else:
+            state['metadata'] = {**state.get('metadata', {}), '_cross_agent_done': True}
+        
+        return state
+    
+    def _cross_agent_decision(self, state: AgentState) -> str:
+        """Route to another agent or finish."""
+        target = state.get('metadata', {}).get('_cross_target')
+        if target in ('calendar', 'email'):
+            logger.info(f"🔗 Chaining to {target} agent")
+            # Clear the target so we don't loop
+            state['metadata'].pop('_cross_target', None)
+            return target
+        return "done"
     
     async def _save_memory_node(self, state: AgentState) -> AgentState:
         """Save to BOTH SQL and Vector memory with fact extraction"""
