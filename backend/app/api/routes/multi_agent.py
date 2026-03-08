@@ -138,11 +138,22 @@ async def code_generation_stream(websocket: WebSocket):
         # Callback for progress updates
         async def send_to_frontend(msg_data: Dict[str, Any]):
             try:
-                await websocket.send_json({
+                payload = {
                     "type": msg_data.get("type", "status"),
                     "message": msg_data.get("message", ""),
                     "timestamp": datetime.now(timezone.utc).isoformat()
-                })
+                }
+                # Forward web agent specific data
+                if msg_data.get("type", "").startswith("web_agent_"):
+                    if "action" in msg_data:
+                        payload["action"] = msg_data["action"]
+                    if "plan" in msg_data:
+                        payload["plan"] = msg_data["plan"]
+                    if "step" in msg_data:
+                        payload["step"] = msg_data["step"]
+                    if "success" in msg_data:
+                        payload["success"] = msg_data["success"]
+                await websocket.send_json(payload)
             except Exception as e:
                 logger.warning(f"⚠️ Send failed: {e}")
         
@@ -196,7 +207,10 @@ async def code_generation_stream(websocket: WebSocket):
                 "server_url": result.get("server_url"),
                 "language": result.get("language"),
                 "metadata": result.get("metadata"),
-                "agent_path": result.get("agent_path")
+                "agent_path": result.get("agent_path"),
+                "web_screenshots": result.get("metadata", {}).get("web_screenshots", []),
+                "web_current_url": result.get("metadata", {}).get("web_current_url", ""),
+                "web_autonomous": result.get("metadata", {}).get("web_autonomous", False),
             },
             "timestamp": datetime.now(timezone.utc).isoformat()
         })
@@ -224,6 +238,40 @@ async def list_conversations(user_id: str):
     except Exception as e:
         logger.error(f"❌ Error listing conversations: {e}")
         return []
+
+
+# ===== WEB AGENT ENDPOINTS =====
+
+class WebAgentPermissionRequest(BaseModel):
+    user_id: str
+    approved: bool
+
+
+@router.post("/web-agent/permission")
+async def web_agent_permission(request: WebAgentPermissionRequest):
+    """User responds to a web agent permission request (approve/deny)."""
+    try:
+        from app.services.web_agent_service import web_agent_service
+        web_agent_service.set_permission_response(
+            user_id=request.user_id,
+            approved=request.approved
+        )
+        return {"success": True, "approved": request.approved}
+    except Exception as e:
+        logger.error(f"❌ Permission response error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/web-agent/close-session")
+async def close_web_session(user_id: str):
+    """Close user's browser session."""
+    try:
+        from app.services.web_agent_service import web_agent_service
+        await web_agent_service.close_session(user_id)
+        return {"success": True, "message": "Browser session closed"}
+    except Exception as e:
+        logger.error(f"❌ Close session error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/conversation/{conversation_id}")
@@ -297,6 +345,7 @@ async def multi_agent_health():
             "router": "Google Gemini Flash",
             "code_specialist": "Google Gemini Pro",
             "desktop_specialist": "Desktop Skills",
+            "web_autonomous": "Playwright + LLM Vision",
             "general_assistant": "Groq Llama"
         },
         "orchestration": "LangGraph StateGraph",
@@ -319,6 +368,8 @@ async def multi_agent_health():
             "Slash commands (/new, /status, /compact, /help)",
             "Context compaction",
             "Agent-to-agent routing",
+            "Autonomous web agent (Perplexity Comet-style)",
+            "Web agent permission system",
             "Model failover (Groq → Gemini)"
         ],
         "timestamp": datetime.now(timezone.utc).isoformat()

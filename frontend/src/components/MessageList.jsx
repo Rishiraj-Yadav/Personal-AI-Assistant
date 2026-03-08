@@ -61,8 +61,8 @@ function MessageList({ messages, isLoading }) {
             </div>
             <div className="welcome-card">
               <div className="wc-icon">🌐</div>
-              <div className="wc-label">Web Tasks</div>
-              <div className="wc-example">"Scrape prices from Amazon"</div>
+              <div className="wc-label">Web Agent</div>
+              <div className="wc-example">"Search the web for best laptops 2026"</div>
             </div>
             <div className="welcome-card">
               <div className="wc-icon">🖥️</div>
@@ -73,6 +73,16 @@ function MessageList({ messages, isLoading }) {
               <div className="wc-icon">📧</div>
               <div className="wc-label">Email & Calendar</div>
               <div className="wc-example">"Check my unread emails"</div>
+            </div>
+            <div className="welcome-card">
+              <div className="wc-icon">🔍</div>
+              <div className="wc-label">Research</div>
+              <div className="wc-example">"Research AI news and summarize"</div>
+            </div>
+            <div className="welcome-card">
+              <div className="wc-icon">🛒</div>
+              <div className="wc-label">Shop & Compare</div>
+              <div className="wc-example">"Compare flight prices to NYC"</div>
             </div>
           </div>
         </div>
@@ -114,6 +124,36 @@ function MessageList({ messages, isLoading }) {
                     <span>✅ Server running at </span>
                     <a href={message.metadata.server_url} target="_blank" rel="noopener noreferrer">{message.metadata.server_url}</a>
                   </div>
+                )}
+              </div>
+            )}
+
+            {/* Web Agent Screenshot */}
+            {message.metadata?.web_screenshots && message.metadata.web_screenshots.length > 0 && (
+              <div className="web-agent-screenshots">
+                <div className="web-screenshot-header">🌐 Web Agent — Browser View</div>
+                {message.metadata.web_current_url && (
+                  <div className="web-url-bar">
+                    <span className="url-icon">🔗</span>
+                    <span className="url-text">{message.metadata.web_current_url}</span>
+                  </div>
+                )}
+                <div className="web-screenshot-frame">
+                  <img
+                    src={`data:image/png;base64,${message.metadata.web_screenshots[message.metadata.web_screenshots.length - 1]}`}
+                    alt="Web page screenshot"
+                    className="web-screenshot-img"
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Web Agent Actions Badge */}
+            {message.metadata?.web_autonomous && (
+              <div className="web-agent-info">
+                <span className="meta-badge web-auto">🌐 Autonomous Web Agent</span>
+                {message.metadata.web_actions_count > 0 && (
+                  <span className="meta-badge web-actions">{message.metadata.web_actions_count} actions performed</span>
                 )}
               </div>
             )}

@@ -16,7 +16,7 @@ class AgentState(TypedDict):
     conversation_id: str
     
     # Task classification
-    task_type: Optional[Literal["coding", "desktop", "web", "general"]]
+    task_type: Optional[Literal["coding", "desktop", "web", "web_autonomous", "email", "calendar", "general"]]
     confidence: Optional[float]
     
     # Code-specific fields - UPDATED FOR MULTI-FILE

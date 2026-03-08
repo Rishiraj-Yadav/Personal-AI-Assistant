@@ -9,7 +9,7 @@ from app.database.models import UserPermission, User
 
 
 # All agents available
-ALL_AGENTS = ["general", "coding", "web", "email", "calendar", "desktop"]
+ALL_AGENTS = ["general", "coding", "web", "web_autonomous", "email", "calendar", "desktop"]
 
 # Default permission profiles — everyone gets full access
 PERMISSION_PROFILES = {
@@ -47,6 +47,14 @@ class PermissionService:
             perm = db.query(UserPermission).filter_by(user_id=user_id).first()
             if not perm:
                 perm = self._create_default(db, user_id)
+            else:
+                # Auto-upgrade: ensure existing users get any newly added agents
+                current = set(perm.allowed_agents or [])
+                expected = set(ALL_AGENTS)
+                if not expected.issubset(current):
+                    perm.allowed_agents = list(expected | current)
+                    db.commit()
+                    db.refresh(perm)
             return {
                 "user_id": perm.user_id,
                 "tier": perm.tier,

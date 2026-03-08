@@ -3,6 +3,7 @@ Router Agent - SMART VERSION
 Automatically detects task type without user needing to toggle
 """
 import os
+import re
 from typing import Dict, Any
 from loguru import logger
 import google.generativeai as genai
@@ -14,6 +15,17 @@ class RouterAgent:
     User never needs to pick mode - it just works!
     """
     
+    # Pre-compiled patterns for fast-path routing (catches typos too)
+    _WEB_FAST_PATTERNS = re.compile(
+        r'brows|open\s+.{0,6}brows|'             # browser / broswer / browsr etc.
+        r'leetcode|amazon|flipkart|youtube|github|'
+        r'stackoverflow|wikipedia|reddit|twitter|'
+        r'linkedin|facebook|instagram|netflix|'
+        r'\.com\b|\.org\b|\.io\b|\.net\b|\.dev\b|'
+        r'https?://|www\.',
+        re.IGNORECASE
+    )
+    
     def __init__(self):
         api_key = os.getenv("GOOGLE_API_KEY", "")
         genai.configure(api_key=api_key)
@@ -23,21 +35,39 @@ class RouterAgent:
     def classify_task(
         self,
         user_message: str,
-        user_context: str = ""  # NEW - User preferences
+        user_context: str = "",
+        conversation_history: list = None
     ) -> Dict[str, Any]:
         """
-        Classify task with user context
-        
-        Args:
-            user_message: What user asked
-            user_context: User's learned preferences
+        Classify task with user context and conversation history.
         """
+        
+        # ── Fast-path: if message mentions browser/website, skip LLM ──
+        if self._WEB_FAST_PATTERNS.search(user_message):
+            logger.info("🎯 Fast-path: detected browser/website → web_autonomous")
+            return {
+                "task_type": "web_autonomous",
+                "confidence": 0.95,
+                "reasoning": "Detected browser or website reference",
+                "next_agent": "web_autonomous_agent"
+            }
+        
+        # Build recent conversation context for the classifier
+        history_block = ""
+        if conversation_history:
+            recent = conversation_history[-6:]  # last 3 exchanges
+            lines = []
+            for msg in recent:
+                role = msg.get('role', 'user') if isinstance(msg, dict) else 'user'
+                content = (msg.get('content', '') if isinstance(msg, dict) else str(msg))[:120]
+                lines.append(f"  {role}: {content}")
+            history_block = "Recent conversation:\n" + "\n".join(lines) + "\n"
         
         classification_prompt = f"""You are an expert task classifier for a multi-agent AI system.
 
 {user_context}
 
-User Request: "{user_message}"
+{history_block}User Request: "{user_message}"
 
 Analyze this request and classify it into ONE category:
 
@@ -45,36 +75,45 @@ Analyze this request and classify it into ONE category:
    Triggers: "write", "create", "build", "generate", "code", "script", "API", "app", "function"
    Examples: "write a Python script", "create React app", "debug this code", "make calculator"
    
-2. DESKTOP - Control computer (open apps, click, type, screenshot)
-   Triggers: "open", "click", "type", "screenshot", "mouse", "window", "launch", "close"
-   Examples: "open Chrome", "take screenshot", "click at 100,200", "launch VS Code"
+2. DESKTOP - Control the HOST computer (open local desktop apps, click, type, screenshot, mouse)
+   Triggers: "click", "type on keyboard", "screenshot", "mouse", "window", "minimize", "move window"
+   Examples: "take screenshot", "click at 100,200", "launch VS Code", "minimize all windows"
+   NOTE: DESKTOP is ONLY for controlling the user's physical computer. Do NOT use DESKTOP when the user wants to visit a website or browse the web.
    
-3. WEB - Scrape websites, get weather, fetch data
-   Triggers: "scrape", "website", "URL", "weather", "fetch", "download", "browse"
+3. WEB_AUTONOMOUS - Autonomously browse the web, research topics, interact with web pages, fill forms, compare products, book things, perform multi-step web tasks
+   Triggers: "browse", "browser", "open browser", "search the web", "go to", "visit", "look up", "research", "compare", "book", "check price", "find flights", "order", "search for", "find me", "show me", "look for", "web search", "google", "browse to", "open website", "fill form", "sign up on", "buy", "purchase", "leetcode", "amazon", "wikipedia", "youtube", "github"
+   Examples: "open browser on leetcode", "search the web for best laptops 2026", "go to amazon and find AirPods price", "research AI news", "compare flights to NYC", "visit wikipedia and summarize the page about Mars", "open browser and go to github"
+
+4. WEB - Simple scrape/weather/data fetch (no browsing needed)
+   Triggers: "scrape", "weather", "fetch data", "download file", "get HTML"
    Examples: "scrape example.com", "what's the weather", "get data from URL"
 
-4. EMAIL - Gmail operations: read, send, compose, search, draft emails
+5. EMAIL - Gmail operations: read, send, compose, search, draft emails
    Triggers: "email", "mail", "inbox", "send email", "compose", "unread", "gmail"
-   Examples: "check my email", "send email to john", "read my inbox", "search emails from boss", "any unread emails?"
+   Examples: "check my email", "send email to john", "read my inbox"
 
-5. CALENDAR - Google Calendar: events, schedule, meetings, reminders
-   Triggers: "calendar", "schedule", "meeting", "event", "appointment", "remind", "reminder", "what's on"
-   Examples: "what's on my calendar today", "schedule a meeting", "set a reminder", "create event tomorrow 3pm"
+6. CALENDAR - Google Calendar: events, schedule, meetings, reminders
+   Triggers: "calendar", "schedule", "meeting", "event", "appointment", "remind", "reminder"
+   Examples: "what's on my calendar today", "schedule a meeting", "set a reminder"
 
-6. GENERAL - Questions, conversations, explanations, unclear requests
+7. GENERAL - Questions, conversations, explanations, unclear requests
    Triggers: Everything else
    Examples: "how are you", "explain quantum physics", "what can you do"
 
 IMPORTANT RULES:
 - If user mentions code/programming/app/API → CODING
-- If user mentions file paths like "R:/..." → CODING (they want to work with files)
+- If user mentions file paths like "R:/..." → CODING
 - If user says "create", "make", "build" + tech term → CODING
-- If user mentions email/mail/inbox/compose/send email → EMAIL
-- If user mentions calendar/schedule/meeting/event/reminder → CALENDAR
-- Be decisive! Coding is the most common task.
+- "open browser", "browser", or any mention of a website name (leetcode, amazon, google, youtube, github, etc.) → WEB_AUTONOMOUS (NOT desktop!)
+- If user wants to browse, search, research, visit a website, or do anything involving web pages → WEB_AUTONOMOUS
+- If user just wants a simple scrape or weather check → WEB
+- If user mentions email/mail/inbox → EMAIL
+- If user mentions calendar/schedule/meeting → CALENDAR
+- If in doubt between DESKTOP and WEB_AUTONOMOUS, choose WEB_AUTONOMOUS
+- If in doubt between WEB and WEB_AUTONOMOUS, choose WEB_AUTONOMOUS
 
 Respond EXACTLY in this format:
-TASK_TYPE: [coding/desktop/web/email/calendar/general]
+TASK_TYPE: [coding/desktop/web_autonomous/web/email/calendar/general]
 CONFIDENCE: [0.0-1.0]
 REASONING: [Brief explanation]
 
@@ -119,6 +158,7 @@ Classify now:"""
         routing_map = {
             "coding": "code_specialist",
             "desktop": "desktop_specialist",
+            "web_autonomous": "web_autonomous_agent",
             "web": "web_specialist",
             "email": "email_specialist",
             "calendar": "calendar_specialist",
@@ -138,15 +178,35 @@ Classify now:"""
             "debug", "fix", "test", "compile", "execute", "run"
         ]
         
-        # Desktop keywords
+        # Desktop keywords — only physical desktop-control verbs (NOT "open" — too ambiguous)
         desktop_keywords = [
-            "open", "click", "type", "screenshot", "mouse",
-            "keyboard", "window", "close", "minimize"
+            "click", "screenshot", "mouse",
+            "keyboard", "window", "minimize", "maximize",
+            "launch app", "launch vs", "launch notepad",
+            "take screenshot", "move mouse", "press key"
         ]
         
-        # Web keywords
+        # Web autonomous keywords (browsing, research, interaction)
+        web_auto_keywords = [
+            "browse", "browser", "open browser", "search the web",
+            "find on", "go to", "visit", "look up", "research",
+            "compare", "book", "check price", "find flights", "order",
+            "search for", "find me", "google", "web search", "browse to",
+            "open website", "fill form", "show me", "look for",
+            "buy online", "purchase online"
+        ]
+        
+        # Known website names → always web_autonomous
+        website_names = [
+            "leetcode", "amazon", "flipkart", "youtube", "github",
+            "stackoverflow", "wikipedia", "reddit", "twitter",
+            "linkedin", "facebook", "instagram", "netflix",
+            ".com", ".org", ".io", ".net", ".dev", "http"
+        ]
+
+        # Web keywords (simple scrape/fetch)
         web_keywords = [
-            "scrape", "website", "url", "weather", "fetch", "download"
+            "scrape", "weather", "fetch", "download"
         ]
         
         # Email keywords
@@ -161,7 +221,24 @@ Classify now:"""
             "remind", "reminder", "what's on"
         ]
         
-        # Check keywords
+        # Check keywords — order matters: web_auto + website names first
+        # Website names always → web_autonomous
+        if any(kw in message_lower for kw in website_names):
+            return {
+                "task_type": "web_autonomous",
+                "confidence": 0.90,
+                "reasoning": "Detected website name — autonomous browsing",
+                "next_agent": "web_autonomous_agent"
+            }
+        
+        if any(kw in message_lower for kw in web_auto_keywords):
+            return {
+                "task_type": "web_autonomous",
+                "confidence": 0.80,
+                "reasoning": "Matched web autonomous keywords — autonomous browsing",
+                "next_agent": "web_autonomous_agent"
+            }
+        
         if any(kw in message_lower for kw in coding_keywords):
             return {
                 "task_type": "coding",

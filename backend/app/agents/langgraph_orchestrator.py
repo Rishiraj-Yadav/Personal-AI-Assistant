@@ -57,6 +57,12 @@ class AgentState(TypedDict):
     # Desktop specific
     desktop_action: str
     desktop_result: Dict
+    
+    # Web autonomous specific
+    web_screenshots: List[str]
+    web_actions: List[Dict]
+    web_current_url: str
+    web_permission_needed: Dict
 
 
 class LangGraphOrchestrator:
@@ -73,12 +79,13 @@ class LangGraphOrchestrator:
         """Build agent graph with ALL 6 agent types + cross-agent routing"""
         workflow = StateGraph(AgentState)
         
-        # ALL NODES: code, desktop, web, email, calendar, general + cross-agent check
+        # ALL NODES: code, desktop, web, web_autonomous, email, calendar, general + cross-agent check
         workflow.add_node("load_context", self._load_context_node)
         workflow.add_node("route", self._route_node)
         workflow.add_node("code_agent", self._code_agent_node)
         workflow.add_node("desktop_agent", self._desktop_agent_node)
         workflow.add_node("web_agent", self._web_agent_node)
+        workflow.add_node("web_autonomous_agent", self._web_autonomous_agent_node)
         workflow.add_node("email_agent", self._email_agent_node)
         workflow.add_node("calendar_agent", self._calendar_agent_node)
         workflow.add_node("general_agent", self._general_agent_node)
@@ -89,7 +96,7 @@ class LangGraphOrchestrator:
         workflow.set_entry_point("load_context")
         workflow.add_edge("load_context", "route")
         
-        # Routing for ALL 6 types
+        # Routing for ALL 7 types
         workflow.add_conditional_edges(
             "route",
             self._route_decision,
@@ -97,6 +104,7 @@ class LangGraphOrchestrator:
                 "coding": "code_agent",
                 "desktop": "desktop_agent",
                 "web": "web_agent",
+                "web_autonomous": "web_autonomous_agent",
                 "email": "email_agent",
                 "calendar": "calendar_agent",
                 "general": "general_agent"
@@ -107,6 +115,7 @@ class LangGraphOrchestrator:
         workflow.add_edge("code_agent", "cross_agent_check")
         workflow.add_edge("desktop_agent", "cross_agent_check")
         workflow.add_edge("web_agent", "cross_agent_check")
+        workflow.add_edge("web_autonomous_agent", "cross_agent_check")
         workflow.add_edge("email_agent", "cross_agent_check")
         workflow.add_edge("calendar_agent", "cross_agent_check")
         workflow.add_edge("general_agent", "cross_agent_check")
@@ -118,6 +127,7 @@ class LangGraphOrchestrator:
             {
                 "calendar": "calendar_agent",
                 "email": "email_agent",
+                "web_autonomous": "web_autonomous_agent",
                 "done": "save_memory"
             }
         )
@@ -180,10 +190,11 @@ class LangGraphOrchestrator:
         logger.info("🎯 Routing task...")
         
         try:
-            # Classify with user context
+            # Classify with user context + conversation history
             result = router_agent.classify_task(
                 user_message=state['user_message'],
-                user_context=state.get('user_context', '')
+                user_context=state.get('user_context', ''),
+                conversation_history=state.get('conversation_history', [])
             )
             
             state['task_type'] = result['task_type']
@@ -211,6 +222,7 @@ class LangGraphOrchestrator:
             'code': 'coding',
             'desktop': 'desktop',
             'web': 'web',
+            'web_autonomous': 'web_autonomous',
             'email': 'email',
             'calendar': 'calendar',
             'general': 'general'
@@ -654,6 +666,84 @@ EXPLANATION: Opening Notepad and typing hello world"""
             state['current_output'] = f"Web task error: {str(e)}"
             state['final_output'] = state['current_output']
             state['errors'].append(f"Web agent error: {str(e)}")
+            state['success'] = False
+        
+        return state
+    
+    async def _web_autonomous_agent_node(self, state: AgentState) -> AgentState:
+        """
+        Autonomous Web Agent — Perplexity Comet-style browser automation.
+        
+        Capabilities:
+        - Navigate to any URL and understand page content
+        - Take screenshots and read DOM to comprehend pages
+        - Execute multi-step browsing tasks autonomously
+        - Ask for user permission before sensitive actions
+        - Extract and summarize information from web pages
+        - Integrate with memory for personalized web browsing
+        """
+        logger.info("🌐 Web Autonomous Agent processing...")
+        
+        try:
+            from app.services.web_agent_service import web_agent_service
+            
+            user_id = state['user_id']
+            user_message = state['user_message']
+            conversation_history = state.get('conversation_history', [])
+            user_context = state.get('user_context', '')
+            
+            # Progress callback — forward to message_callback if available
+            callback = state.get('metadata', {}).get('_message_callback')
+            
+            # Execute the autonomous web task
+            result = await web_agent_service.execute_task(
+                user_message=user_message,
+                user_id=user_id,
+                conversation_history=[
+                    msg for msg in conversation_history
+                    if isinstance(msg, dict)
+                ],
+                user_context=user_context,
+                message_callback=callback,
+            )
+            
+            # Set outputs
+            state['current_output'] = result.get('output', 'Web task completed.')
+            state['final_output'] = state['current_output']
+            state['agent_path'].append('web_autonomous_agent')
+            state['success'] = result.get('success', False)
+            state['web_screenshots'] = result.get('screenshots', [])
+            state['web_actions'] = result.get('actions_taken', [])
+            state['web_current_url'] = result.get('current_url', '')
+            state['web_permission_needed'] = result.get('permission_needed') or {}
+            
+            # Store metadata for frontend
+            state['metadata'] = {
+                **state.get('metadata', {}),
+                'web_screenshots': result.get('screenshots', [])[-1:],  # last screenshot
+                'web_actions_count': len(result.get('actions_taken', [])),
+                'web_current_url': result.get('current_url', ''),
+                'web_autonomous': True,
+            }
+            
+            # Learn from web browsing behavior
+            if user_id and result.get('success'):
+                self.memory_service.learn_from_behavior(user_id, {
+                    'task_type': 'web_autonomous',
+                    'success': True,
+                    'actions_count': len(result.get('actions_taken', [])),
+                    'url_visited': result.get('current_url', ''),
+                })
+            
+            logger.info(f"✅ Web autonomous complete: {len(result.get('actions_taken', []))} actions")
+        
+        except Exception as e:
+            logger.error(f"❌ Web autonomous agent error: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            state['current_output'] = f"🌐 Web agent error: {str(e)}"
+            state['final_output'] = state['current_output']
+            state['errors'].append(f"Web autonomous error: {str(e)}")
             state['success'] = False
         
         return state
@@ -1222,6 +1312,16 @@ EXPLANATION: Brief description"""
                 cross_target = 'email'
                 cross_context = f"Send an email about this calendar event: {current_output[:500]}"
         
+        # General/Email/Calendar → Web Autonomous: detect web lookup needs
+        if 'web_autonomous_agent' not in agent_path:
+            web_triggers = [
+                'look it up', 'search online', 'check the web', 'find online',
+                'browse for', 'google it', 'search for more', 'find the link'
+            ]
+            if any(phrase in user_message for phrase in web_triggers):
+                cross_target = 'web_autonomous'
+                cross_context = f"Search the web based on this context: {current_output[:500]}"
+        
         if cross_target and cross_context:
             logger.info(f"🔗 Cross-agent routing: → {cross_target}")
             state['metadata'] = {**state.get('metadata', {}), '_cross_agent_done': True,
@@ -1236,7 +1336,7 @@ EXPLANATION: Brief description"""
     def _cross_agent_decision(self, state: AgentState) -> str:
         """Route to another agent or finish."""
         target = state.get('metadata', {}).get('_cross_target')
-        if target in ('calendar', 'email'):
+        if target in ('calendar', 'email', 'web_autonomous'):
             logger.info(f"🔗 Chaining to {target} agent")
             # Clear the target so we don't loop
             state['metadata'].pop('_cross_target', None)
@@ -1338,15 +1438,26 @@ EXPLANATION: Brief description"""
             'files': {},
             'language': '',
             'desktop_action': '',
-            'desktop_result': {}
+            'desktop_result': {},
+            'web_screenshots': [],
+            'web_actions': [],
+            'web_current_url': '',
+            'web_permission_needed': {}
         }
+        
+        # Pass message callback via metadata for agents that need it
+        if message_callback:
+            initial_state['metadata']['_message_callback'] = message_callback
         
         try:
             # Execute graph
             result = await self.graph.ainvoke(initial_state)
             
-            # Build response
-            extra_metadata = result.get('metadata', {})
+            # Build response — drop non-serializable keys
+            extra_metadata = {
+                k: v for k, v in result.get('metadata', {}).items()
+                if not callable(v) and not k.startswith('_')
+            }
             response = {
                 'success': result.get('success', False),
                 'output': result.get('final_output', ''),
@@ -1367,6 +1478,9 @@ EXPLANATION: Brief description"""
                     'routing_reason': result.get('routing_reason'),
                     'iterations': result.get('iteration', 1),
                     'errors': result.get('errors', []),
+                    'web_screenshots': result.get('web_screenshots', []),
+                    'web_actions_count': len(result.get('web_actions', [])),
+                    'web_current_url': result.get('web_current_url', ''),
                     **extra_metadata
                 }
             }

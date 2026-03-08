@@ -35,6 +35,8 @@ function ChatInterface() {
     return localStorage.getItem(CONVERSATION_ID_KEY) || null
   })
 
+  const [webPermissionPending, setWebPermissionPending] = useState(null)
+
   const messagesEndRef = useRef(null)
   const inputRef = useRef(null)
   const profileRef = useRef(null)
@@ -153,7 +155,11 @@ function ChatInterface() {
           main_file: response.data.main_file,
           server_running: response.data.server_running,
           server_url: response.data.server_url,
-          language: response.data.language
+          language: response.data.language,
+          web_screenshots: response.data.web_screenshots || response.data.metadata?.web_screenshots || [],
+          web_current_url: response.data.web_current_url || response.data.metadata?.web_current_url || '',
+          web_autonomous: response.data.web_autonomous || response.data.metadata?.web_autonomous || false,
+          web_actions_count: response.data.metadata?.web_actions_count || 0
         }
       }
       setMessages(prev => [...prev, assistantMessage])
@@ -189,6 +195,14 @@ function ChatInterface() {
         else if (data.type === 'iteration') setProgress(`🔄 Iteration ${data.iteration}/${data.total}`)
         else if (data.type === 'fixing') setProgress('🔧 ' + data.message)
         else if (data.type === 'success') setProgress('✅ ' + data.message)
+        else if (data.type === 'web_agent_plan') setProgress('🌐 ' + data.message)
+        else if (data.type === 'web_agent_step') setProgress('🌐 ' + data.message)
+        else if (data.type === 'web_agent_action') setProgress(data.success ? '✅ ' + data.message : '❌ ' + data.message)
+        else if (data.type === 'web_agent_done') setProgress('🌐 ' + data.message)
+        else if (data.type === 'web_agent_permission') {
+          setProgress('⚠️ Permission needed...')
+          handleWebAgentPermission(data)
+        }
         else if (data.type === 'complete') { finalResult = data.result; ws.close() }
         else if (data.type === 'error') { reject(new Error(data.message)); ws.close() }
       }
@@ -216,7 +230,10 @@ function ChatInterface() {
               server_running: finalResult.server_running,
               server_url: finalResult.server_url,
               language: finalResult.language,
-              metadata: finalResult.metadata
+              metadata: finalResult.metadata,
+              web_screenshots: finalResult.web_screenshots,
+              web_current_url: finalResult.web_current_url,
+              web_autonomous: finalResult.web_autonomous,
             }
           })
         } else { reject(new Error('Connection closed unexpectedly')) }
@@ -230,6 +247,25 @@ function ChatInterface() {
     setConversationId(null)
     setError(null)
     setProgress(null)
+  }
+
+  const handleWebAgentPermission = (data) => {
+    setWebPermissionPending({
+      message: data.message,
+      action: data.action
+    })
+  }
+
+  const respondToWebPermission = async (approved) => {
+    try {
+      await axios.post(`${API_BASE_URL}/multi-agent/web-agent/permission`, {
+        user_id: userId,
+        approved
+      })
+    } catch (err) {
+      console.error('Permission response failed:', err)
+    }
+    setWebPermissionPending(null)
   }
 
   const handleInputChange = (e) => {
@@ -375,6 +411,21 @@ function ChatInterface() {
           <div className="error-banner">
             <span>⚠️ {error}</span>
             <button onClick={() => setError(null)} className="btn-icon-sm">✕</button>
+          </div>
+        )}
+
+        {/* Web Agent Permission Dialog */}
+        {webPermissionPending && (
+          <div className="permission-banner">
+            <div className="permission-icon">⚠️</div>
+            <div className="permission-content">
+              <div className="permission-title">Web Agent — Permission Required</div>
+              <div className="permission-desc">{webPermissionPending.message}</div>
+            </div>
+            <div className="permission-actions">
+              <button className="btn-permission approve" onClick={() => respondToWebPermission(true)}>✅ Approve</button>
+              <button className="btn-permission deny" onClick={() => respondToWebPermission(false)}>❌ Deny</button>
+            </div>
           </div>
         )}
 
