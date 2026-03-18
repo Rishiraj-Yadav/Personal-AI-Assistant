@@ -23,69 +23,12 @@ from agent_brain import brain
 
 # ───── Initialize Agents ─────
 def register_all_agents():
-    """Import and register all specialist agents"""
-    agents_loaded = []
-
-    try:
-        from agents.app_agent import app_agent
-        registry.register_agent(app_agent)
-        agents_loaded.append("app")
-    except Exception as e:
-        logger.warning(f"Failed to load App Agent: {e}")
-
-    try:
-        from agents.shell_agent import shell_agent
-        registry.register_agent(shell_agent)
-        agents_loaded.append("shell")
-    except Exception as e:
-        logger.warning(f"Failed to load Shell Agent: {e}")
-
-    try:
-        from agents.file_agent import file_agent
-        registry.register_agent(file_agent)
-        agents_loaded.append("file")
-    except Exception as e:
-        logger.warning(f"Failed to load File Agent: {e}")
-
-    try:
-        from agents.gui_agent import gui_agent
-        registry.register_agent(gui_agent)
-        agents_loaded.append("gui")
-    except Exception as e:
-        logger.warning(f"Failed to load GUI Agent: {e}")
-
-    try:
-        from agents.system_agent import system_agent
-        registry.register_agent(system_agent)
-        agents_loaded.append("system")
-    except Exception as e:
-        logger.warning(f"Failed to load System Agent: {e}")
-
-    try:
-        from agents.web_agent import web_agent
-        registry.register_agent(web_agent)
-        agents_loaded.append("web")
-    except Exception as e:
-        logger.warning(f"Failed to load Web Agent: {e}")
-
-    try:
-        from agents.scheduler_agent import scheduler_agent
-        registry.register_agent(scheduler_agent)
-        agents_loaded.append("scheduler")
-    except Exception as e:
-        logger.warning(f"Failed to load Scheduler Agent: {e}")
-
-    try:
-        from agents.notification_agent import notification_agent
-        registry.register_agent(notification_agent)
-        agents_loaded.append("notification")
-    except Exception as e:
-        logger.warning(f"Failed to load Notification Agent: {e}")
-
-    logger.info(
-        f"✅ Loaded {len(agents_loaded)}/{8} agents: {', '.join(agents_loaded)}"
-    )
-    return agents_loaded
+    """Dynamically import and register all specialist agents"""
+    # Simply point to the agents directory to dynamically load plugins
+    # exactly like OpenClaw's plugin architecture!
+    current_dir = Path(__file__).parent
+    agents_dir = current_dir / "agents"
+    return registry.discover_agents(str(agents_dir))
 
 
 # Register agents at import time
@@ -134,6 +77,33 @@ class SkillExecutionResponse(BaseModel):
     success: bool
     result: Any
     safe_mode: bool = False
+    error: Optional[str] = None
+
+
+class NodeDescribeResponse(BaseModel):
+    """Node identity + status (OpenClaw-style)"""
+    ok: bool
+    node: Dict[str, Any]
+
+
+class NodeToolsResponse(BaseModel):
+    """Node tools list (OpenClaw-style)"""
+    ok: bool
+    tools: List[Dict[str, Any]]
+
+
+class NodeExecuteRequest(BaseModel):
+    """Node tool execution request (OpenClaw-style)"""
+    tool: str
+    args: Dict[str, Any] = {}
+    session_id: Optional[str] = None
+
+
+class NodeExecuteResponse(BaseModel):
+    """Node tool execution response (OpenClaw-style)"""
+    ok: bool
+    tool: str
+    result: Any = None
     error: Optional[str] = None
 
 
@@ -223,6 +193,63 @@ async def list_capabilities(api_key: str = Depends(verify_api_key)):
         "agents": registry.list_agents(),
         "total_tools": registry.tool_count,
     }
+
+
+# ───── Node Protocol (Gateway ↔ Node) ─────
+@app.get("/node/describe", response_model=NodeDescribeResponse)
+async def node_describe(api_key: str = Depends(verify_api_key)):
+    """
+    Describe this node and its current status.
+    This is designed for a Gateway to discover/monitor node capabilities.
+    """
+    return NodeDescribeResponse(
+        ok=True,
+        node={
+            "id": "desktop-windows",
+            "name": "Desktop Node (Windows)",
+            "version": "2.0.0",
+            "endpoint": f"http://{settings.HOST}:{settings.PORT}",
+            "safe_mode": settings.SAFE_MODE,
+            "agents_loaded": registry.agent_count,
+            "tools_available": registry.tool_count,
+            "brain_ready": brain.model is not None,
+        },
+    )
+
+
+@app.get("/node/tools", response_model=NodeToolsResponse)
+async def node_tools(api_key: str = Depends(verify_api_key)):
+    """
+    Return tool declarations in a node-friendly format.
+    For now, we reuse the registry tools as-is; the Gateway will normalize schemas.
+    """
+    tools_raw = registry.get_all_tools()
+    # Flatten to keep it lightweight for the Gateway.
+    flat = []
+    for item in tools_raw:
+        fn = item.get("function") or {}
+        if fn.get("name"):
+            flat.append(fn)
+    return NodeToolsResponse(ok=True, tools=flat)
+
+
+@app.post("/node/execute", response_model=NodeExecuteResponse)
+async def node_execute(
+    request: NodeExecuteRequest,
+    api_key: str = Depends(verify_api_key),
+):
+    """
+    Execute a tool directly on this node.
+    This bypasses the NL brain and is intended for Gateway-driven tool execution.
+    """
+    try:
+        result = registry.execute_tool(request.tool, request.args)
+        if result.get("success"):
+            return NodeExecuteResponse(ok=True, tool=request.tool, result=result.get("result"))
+        return NodeExecuteResponse(ok=False, tool=request.tool, error=result.get("error") or "Tool failed")
+    except Exception as e:
+        logger.error(f"Node execute error: {e}")
+        return NodeExecuteResponse(ok=False, tool=request.tool, error=str(e))
 
 
 @app.post("/clear-history")

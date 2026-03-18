@@ -63,9 +63,6 @@ class DesktopBridgeSkill:
             Path(__file__).parent.parent.parent / "desktop-agent" / "config" / "api_key.txt",
             Path("../desktop-agent/config/api_key.txt"),
             Path("../../desktop-agent/config/api_key.txt"),
-            
-            # Windows direct paths
-            Path("R:/6_semester/mini_project/PAI/desktop-agent/config/api_key.txt"),
         ]
     
     def _get_api_key(self) -> str:
@@ -282,8 +279,8 @@ async def press_hotkey(keys: list):
 
 async def open_app(app: str, wait: bool = False):
     """Open an application"""
-    return await desktop_bridge.execute_skill("app_launcher", {
-        "app": app,
+    return await desktop_bridge.execute_skill("open_application", {
+        "name": app,
         "wait": wait
     }, safe_mode=False)
 

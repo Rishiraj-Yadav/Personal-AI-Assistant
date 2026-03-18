@@ -4,6 +4,8 @@ import MessageList from './MessageList'
 import { getUserId, getUserName, setUserName, hasUserName } from '../utils/userId'
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1'
+const GATEWAY_WS_URL = import.meta.env.VITE_GATEWAY_WS || 'ws://localhost:18789/ws'
+const USE_GATEWAY_CHAT = (import.meta.env.VITE_USE_GATEWAY_CHAT || 'false') === 'true'
 const CONVERSATION_ID_KEY = 'sonarbot_conversation_id'
 
 const SLASH_COMMANDS = [
@@ -35,6 +37,10 @@ function ChatInterface() {
     return localStorage.getItem(CONVERSATION_ID_KEY) || null
   })
 
+  const [gatewaySessionId, setGatewaySessionId] = useState(() => {
+    return localStorage.getItem('gateway_session_id') || null
+  })
+
   const [webPermissionPending, setWebPermissionPending] = useState(null)
 
   const messagesEndRef = useRef(null)
@@ -55,6 +61,10 @@ function ChatInterface() {
   useEffect(() => {
     if (conversationId) localStorage.setItem(CONVERSATION_ID_KEY, conversationId)
   }, [conversationId])
+
+  useEffect(() => {
+    if (gatewaySessionId) localStorage.setItem('gateway_session_id', gatewaySessionId)
+  }, [gatewaySessionId])
 
   // Close profile dropdown on outside click
   useEffect(() => {
@@ -137,36 +147,47 @@ function ChatInterface() {
     setSlashSuggestions([])
 
     try {
-      const response = await sendWithSmartAgent(inputMessage)
-      const assistantMessage = {
-        role: 'assistant',
-        content: response.data.response,
-        timestamp: response.data.timestamp || new Date().toISOString(),
-        metadata: {
-          model: response.data.model_used,
-          tokens: response.data.tokens_used,
-          task_type: response.data.task_type,
-          agent_path: response.data.agent_path,
-          iterations: response.data.metadata?.total_iterations,
-          code: response.data.code,
-          files: response.data.files,
-          file_path: response.data.file_path,
-          project_structure: response.data.project_structure,
-          main_file: response.data.main_file,
-          server_running: response.data.server_running,
-          server_url: response.data.server_url,
-          language: response.data.language,
-          web_screenshots: response.data.web_screenshots || response.data.metadata?.web_screenshots || [],
-          web_current_url: response.data.web_current_url || response.data.metadata?.web_current_url || '',
-          web_autonomous: response.data.web_autonomous || response.data.metadata?.web_autonomous || false,
-          web_actions_count: response.data.metadata?.web_actions_count || 0
+      if (USE_GATEWAY_CHAT) {
+        const gw = await sendViaGateway(inputMessage)
+        const assistantMessage = {
+          role: 'assistant',
+          content: gw.response,
+          timestamp: new Date().toISOString(),
+          metadata: { model: 'GatewayRouterV0' }
         }
+        setMessages(prev => [...prev, assistantMessage])
+      } else {
+        const response = await sendWithSmartAgent(inputMessage)
+        const assistantMessage = {
+          role: 'assistant',
+          content: response.data.response,
+          timestamp: response.data.timestamp || new Date().toISOString(),
+          metadata: {
+            model: response.data.model_used,
+            tokens: response.data.tokens_used,
+            task_type: response.data.task_type,
+            agent_path: response.data.agent_path,
+            iterations: response.data.metadata?.total_iterations,
+            code: response.data.code,
+            files: response.data.files,
+            file_path: response.data.file_path,
+            project_structure: response.data.project_structure,
+            main_file: response.data.main_file,
+            server_running: response.data.server_running,
+            server_url: response.data.server_url,
+            language: response.data.language,
+            web_screenshots: response.data.web_screenshots || response.data.metadata?.web_screenshots || [],
+            web_current_url: response.data.web_current_url || response.data.metadata?.web_current_url || '',
+            web_autonomous: response.data.web_autonomous || response.data.metadata?.web_autonomous || false,
+            web_actions_count: response.data.metadata?.web_actions_count || 0
+          }
+        }
+        setMessages(prev => [...prev, assistantMessage])
+        if (!conversationId && response.data.conversation_id) {
+          setConversationId(response.data.conversation_id)
+        }
+        loadConversationList()
       }
-      setMessages(prev => [...prev, assistantMessage])
-      if (!conversationId && response.data.conversation_id) {
-        setConversationId(response.data.conversation_id)
-      }
-      loadConversationList()
     } catch (err) {
       setError(err.response?.data?.detail || err.message || 'Failed to send message.')
       setMessages(prev => prev.slice(0, -1))
@@ -241,10 +262,45 @@ function ChatInterface() {
     })
   }
 
+  const sendViaGateway = async (text) => {
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(GATEWAY_WS_URL)
+      let assistantText = null
+      let sid = gatewaySessionId
+
+      ws.onopen = () => {
+        ws.send(JSON.stringify({ type: 'session.message', session_id: sid || undefined, text }))
+      }
+
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data)
+        if (data.type === 'session_created' && data.session_id) {
+          sid = data.session_id
+          setGatewaySessionId(data.session_id)
+        }
+        if (data.type === 'tool_call') setProgress('🛠️ ' + (data.data?.tool || 'tool'))
+        if (data.type === 'tool_result') setProgress('✅ tool result')
+        if (data.type === 'message' && data.data?.role === 'assistant') {
+          assistantText = data.data.content
+        }
+        if (data.type === 'complete') ws.close()
+        if (data.type === 'error') { reject(new Error(data.data?.error || 'Gateway error')); ws.close() }
+      }
+
+      ws.onerror = (err) => { reject(err); ws.close() }
+      ws.onclose = () => {
+        if (assistantText != null) resolve({ response: assistantText, session_id: sid })
+        else reject(new Error('Gateway connection closed unexpectedly'))
+      }
+    })
+  }
+
   const clearConversation = () => {
     setMessages([])
     localStorage.removeItem(CONVERSATION_ID_KEY)
     setConversationId(null)
+    localStorage.removeItem('gateway_session_id')
+    setGatewaySessionId(null)
     setError(null)
     setProgress(null)
   }

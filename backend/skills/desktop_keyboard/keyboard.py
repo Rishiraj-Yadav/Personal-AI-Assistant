@@ -11,9 +11,15 @@ async def main():
     try:
         params_json = os.environ.get("SKILL_PARAMS", "{}")
         params = json.loads(params_json)
-        
-        result = await desktop_bridge.execute_skill("keyboard_control", params, safe_mode=False)
-        
+        action = params.get("action")
+        if action == "type":
+            result = await desktop_bridge.execute_skill("type_text", {"text": params.get("text", "")}, safe_mode=False)
+        elif action == "press":
+            result = await desktop_bridge.execute_skill("press_key", {"key": params.get("key", "")}, safe_mode=False)
+        elif action == "hotkey":
+            result = await desktop_bridge.execute_skill("press_hotkey", {"keys": params.get("keys", [])}, safe_mode=False)
+        else:
+            result = {"success": False, "error": f"Unknown action: {action}"}
         if result.get("success"):
             output = result.get("result", {})
         else:

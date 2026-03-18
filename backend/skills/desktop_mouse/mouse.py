@@ -11,9 +11,18 @@ async def main():
     try:
         params_json = os.environ.get("SKILL_PARAMS", "{}")
         params = json.loads(params_json)
-        
-        result = await desktop_bridge.execute_skill("mouse_control", params, safe_mode=False)
-        
+        action = params.get("action", "click")
+        if action == "move":
+            result = await desktop_bridge.execute_skill("mouse_move", {"x": params.get("x", 0), "y": params.get("y", 0)}, safe_mode=False)
+        elif action in ["click", "double_click", "right_click"]:
+            button = params.get("button", "left")
+            if action == "right_click": button = "right"
+            clicks = 2 if action == "double_click" else params.get("clicks", 1)
+            result = await desktop_bridge.execute_skill("mouse_click", {"button": button, "clicks": clicks}, safe_mode=False)
+        elif action == "scroll":
+            result = await desktop_bridge.execute_skill("mouse_scroll", {"direction": params.get("direction", "down"), "amount": params.get("amount", 3)}, safe_mode=False)
+        else:
+            result = {"success": False, "error": f"Unknown action: {action}"}
         if result.get("success"):
             output = result.get("result", {})
         else:

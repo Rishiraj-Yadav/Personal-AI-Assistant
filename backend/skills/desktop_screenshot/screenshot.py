@@ -42,7 +42,7 @@ async def main():
             }
         
         # Execute via desktop bridge
-        result = await desktop_bridge.execute_skill("screenshot", args)
+        result = await desktop_bridge.execute_skill("take_screenshot", args)
         
         if result.get("success"):
             # Extract the actual result from desktop agent response

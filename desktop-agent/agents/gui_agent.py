@@ -222,6 +222,20 @@ class GUIAgent(BaseAgent):
                     "required": ["title"],
                 },
             },
+            {
+                "name": "find_element_coordinates_on_screen",
+                "description": "Uses visual AI to look at the screen and find the exact X,Y coordinates of an element (button, icon, text) you want to click.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "element_description": {
+                            "type": "string",
+                            "description": "Description of the element to find (e.g., 'the green submit button', 'the minimize icon in the top right')",
+                        },
+                    },
+                    "required": ["element_description"],
+                },
+            },
         ]
 
     def execute(self, tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -240,6 +254,7 @@ class GUIAgent(BaseAgent):
             "focus_window": self._focus_window,
             "minimize_window": self._minimize_window,
             "maximize_window": self._maximize_window,
+            "find_element_coordinates_on_screen": self._find_element_coordinates,
         }
 
         handler = handlers.get(tool_name)
@@ -398,6 +413,59 @@ class GUIAgent(BaseAgent):
             return self._success(result, f"Maximized window: {args.get('title')}")
         except Exception as e:
             return self._error(f"Maximize failed: {e}")
+
+    def _find_element_coordinates(self, args: Dict) -> Dict[str, Any]:
+        """Use Gemini Vision to analyze screenshot and return XY coordinates"""
+        if not self._screenshot:
+            return self._error("Screenshot not available")
+        
+        desc = args.get("element_description", "")
+        if not desc:
+            return self._error("Must provide element_description")
+
+        try:
+            # Get base64 screenshot
+            screenshot_data = self._screenshot.execute({"format": "base64"})
+            if not screenshot_data:
+                return self._error("Failed to capture screenshot data")
+                
+            # Send to Gemini Flash for XY extraction (Vision capability)
+            import google.generativeai as genai
+            from config import settings
+            import io
+            from PIL import Image
+            import base64
+            import json
+            
+            genai.configure(api_key=settings.GOOGLE_API_KEY)
+            vision_model = genai.GenerativeModel("gemini-2.0-flash")
+            
+            # Decode base64 to image
+            try:
+                img_bytes = base64.b64decode(screenshot_data)
+                img = Image.open(io.BytesIO(img_bytes))
+            except Exception as e:
+                return self._error(f"Failed to decode image: {e}")
+                
+            width, height = img.size
+            
+            prompt = f"Look at this screenshot of size {width}x{height}. Find: '{desc}'. Return ONLY a JSON dictionary with 'x' and 'y' integer coordinates representing its center point. Do not wrap in markdown."
+            
+            response = vision_model.generate_content([prompt, img])
+            text = response.text.strip()
+            
+            if text.startswith("```json"): text = text[7:-3].strip()
+            if text.startswith("```"): text = text[3:-3].strip()
+                
+            coords = json.loads(text)
+            
+            return self._success(
+                {"x": coords.get("x"), "y": coords.get("y"), "element": desc},
+                f"Found {desc} at ({coords.get('x')}, {coords.get('y')})"
+            )
+            
+        except Exception as e:
+            return self._error(f"Visual grounding failed to find element: {e}")
 
 
 # Global instance

@@ -24,8 +24,8 @@ async def main():
         app_lower = app.lower()
         app_to_launch = app_mapping.get(app_lower, app)
         
-        result = await desktop_bridge.execute_skill("app_launcher", {
-            "app": app_to_launch
+        result = await desktop_bridge.execute_skill("open_application", {
+            "name": app_to_launch
         }, safe_mode=False)
         
         if result.get("success"):

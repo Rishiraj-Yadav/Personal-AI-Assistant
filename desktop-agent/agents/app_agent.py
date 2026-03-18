@@ -144,6 +144,30 @@ class AppAgent(BaseAgent):
                 },
             },
             {
+                "name": "open_special_folder",
+                "description": "Open a well-known folder directly (avoids typing/navigating in Explorer). Supports OneDrive-backed folders when available.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "folder": {
+                            "type": "string",
+                            "enum": [
+                                "desktop",
+                                "documents",
+                                "downloads",
+                                "pictures",
+                                "onedrive_root",
+                                "onedrive_desktop",
+                                "onedrive_documents",
+                                "onedrive_pictures",
+                            ],
+                            "description": "Which special folder to open",
+                        },
+                    },
+                    "required": ["folder"],
+                },
+            },
+            {
                 "name": "close_application",
                 "description": "Close/kill a running application by name",
                 "parameters": {
@@ -184,6 +208,8 @@ class AppAgent(BaseAgent):
     def execute(self, tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         if tool_name == "open_application":
             return self._open_app(args.get("name", ""))
+        if tool_name == "open_special_folder":
+            return self._open_special_folder(args.get("folder", ""))
         elif tool_name == "close_application":
             return self._close_app(args.get("name", ""))
         elif tool_name == "list_running_apps":
@@ -196,6 +222,23 @@ class AppAgent(BaseAgent):
         """Open an application, folder, or URL"""
         if not name:
             return self._error("No application name provided")
+
+        resolved_folder = self._resolve_special_folder(name)
+        if resolved_folder:
+            try:
+                # Be explicit on Windows: launching explorer with a path reliably opens that folder
+                subprocess.Popen(
+                    ["explorer.exe", resolved_folder],
+                    shell=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                return self._success(
+                    {"opened": resolved_folder, "type": "folder", "resolved_from": name},
+                    f"Opened folder: {resolved_folder}",
+                )
+            except Exception as e:
+                return self._error(f"Failed to open folder '{resolved_folder}': {e}")
 
         # Check if it's a URL
         if name.startswith(("http://", "https://", "www.")):
@@ -211,7 +254,12 @@ class AppAgent(BaseAgent):
         # Check if it's a folder path
         if os.path.isdir(name):
             try:
-                os.startfile(name)
+                subprocess.Popen(
+                    ["explorer.exe", name],
+                    shell=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
                 return self._success(
                     {"opened": name, "type": "folder"},
                     f"Opened folder: {name}",
@@ -264,6 +312,143 @@ class AppAgent(BaseAgent):
                 f"Could not find application '{name}'. "
                 f"Available apps include: {', '.join(list(self._app_cache.keys())[:20])}"
             )
+
+    def _open_special_folder(self, folder: str) -> Dict[str, Any]:
+        key = (folder or "").strip().lower()
+        if not key:
+            return self._error("No folder specified")
+
+        target: str | None = None
+        if key == "desktop":
+            target = self._get_known_folder_path("Desktop")
+        elif key == "documents":
+            target = self._get_known_folder_path("MyDocuments")
+        elif key == "pictures":
+            target = self._get_known_folder_path("MyPictures")
+        elif key == "downloads":
+            target = os.path.join(os.path.expanduser("~"), "Downloads")
+            if not os.path.isdir(target):
+                target = None
+        elif key == "onedrive_root":
+            target = self._get_onedrive_root()
+        elif key in {"onedrive_desktop", "onedrive_documents", "onedrive_pictures"}:
+            root = self._get_onedrive_root()
+            if root:
+                suffix = {
+                    "onedrive_desktop": "Desktop",
+                    "onedrive_documents": "Documents",
+                    "onedrive_pictures": "Pictures",
+                }[key]
+                candidate = os.path.join(root, suffix)
+                target = candidate if os.path.isdir(candidate) else None
+
+        if not target or not os.path.isdir(target):
+            return self._error(f"Special folder not available: {folder}")
+
+        try:
+            subprocess.Popen(
+                ["explorer.exe", target],
+                shell=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return self._success({"opened": target, "type": "folder", "special": key}, f"Opened folder: {target}")
+        except Exception as e:
+            return self._error(f"Failed to open folder '{target}': {e}")
+
+    def _resolve_special_folder(self, raw: str) -> str | None:
+        """
+        Resolve human-friendly folder names (e.g. "Documents folder") to real paths.
+        Uses Windows known folders when possible, since users may have OneDrive redirection.
+        """
+        text = (raw or "").strip().lower()
+        if not text:
+            return None
+
+        # Normalize common phrasing
+        for suffix in [" folder", " directory", " in file explorer", " in explorer", " in windows explorer"]:
+            if text.endswith(suffix):
+                text = text[: -len(suffix)].strip()
+
+        # OneDrive-specific phrasing (explicitly open OneDrive's Desktop/Documents when requested)
+        if "onedrive" in text:
+            onedrive_root = self._get_onedrive_root()
+            if onedrive_root:
+                if "desktop" in text:
+                    candidate = os.path.join(onedrive_root, "Desktop")
+                    return candidate if os.path.isdir(candidate) else None
+                if "documents" in text or "document" in text:
+                    candidate = os.path.join(onedrive_root, "Documents")
+                    return candidate if os.path.isdir(candidate) else None
+                if "pictures" in text or "photos" in text:
+                    candidate = os.path.join(onedrive_root, "Pictures")
+                    return candidate if os.path.isdir(candidate) else None
+
+        # Keywords → known folder tokens
+        # Keep these simple and high-confidence to avoid opening wrong locations.
+        if text in {"documents", "document", "my documents"}:
+            return self._get_known_folder_path("MyDocuments")
+        if text in {"desktop", "my desktop"}:
+            return self._get_known_folder_path("Desktop")
+        if text in {"pictures", "photos", "my pictures"}:
+            return self._get_known_folder_path("MyPictures")
+
+        # Downloads isn't a standard .NET SpecialFolder on older versions; use a reliable fallback.
+        if text in {"downloads", "download"}:
+            candidate = os.path.join(os.path.expanduser("~"), "Downloads")
+            return candidate if os.path.isdir(candidate) else None
+
+        return None
+
+    def _get_known_folder_path(self, special_folder: str) -> str | None:
+        """Return a Windows known folder path via PowerShell, with a safe fallback."""
+        try:
+            result = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    f"[Environment]::GetFolderPath('{special_folder}')",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            path = (result.stdout or "").strip()
+            if path and os.path.isdir(path):
+                return path
+        except Exception:
+            pass
+
+        # Fallbacks if PowerShell fails
+        home = os.path.expanduser("~")
+        fallback_map = {
+            "Desktop": os.path.join(home, "Desktop"),
+            "MyDocuments": os.path.join(home, "Documents"),
+            "MyPictures": os.path.join(home, "Pictures"),
+        }
+        fallback = fallback_map.get(special_folder)
+        return fallback if fallback and os.path.isdir(fallback) else None
+
+    def _get_onedrive_root(self) -> str | None:
+        """
+        Attempt to locate the user's OneDrive root directory.
+        Common environment variables vary depending on account type.
+        """
+        candidates = [
+            os.environ.get("OneDrive", ""),
+            os.environ.get("OneDriveConsumer", ""),
+            os.environ.get("OneDriveCommercial", ""),
+        ]
+        for c in candidates:
+            c = (c or "").strip().strip('"')
+            if c and os.path.isdir(c):
+                return c
+
+        # Fallback: typical default location under user profile
+        home = os.path.expanduser("~")
+        fallback = os.path.join(home, "OneDrive")
+        return fallback if os.path.isdir(fallback) else None
 
     def _close_app(self, name: str) -> Dict[str, Any]:
         """Close an application by name"""

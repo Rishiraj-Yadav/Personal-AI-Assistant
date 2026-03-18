@@ -396,12 +396,16 @@ class LangGraphOrchestrator:
                 content="""You are a Desktop Control Agent. Parse the user's request into ONE OR MORE desktop actions.
 
 Available skills and their arguments:
-- screenshot: {"region": null, "monitor": 1, "format": "base64"}
-- mouse_control: {"action": "move|click|double_click|right_click|scroll", "x": int, "y": int, "button": "left|right", "clicks": 1, "direction": "up|down", "amount": 3}
-- keyboard_control: {"action": "type|press|hotkey", "text": "string", "key": "string", "keys": ["ctrl", "c"], "interval": 0.05}
-- app_launcher: {"app": "app_name", "wait": false}
-- window_manager: {"action": "list|focus|minimize|maximize|close", "title": "window_title"}
-- screen_reader: {"language": "eng", "region": null}
+- take_screenshot: {"region": null, "monitor": 1, "format": "base64"}
+- mouse_move: {"x": int, "y": int, "duration": 0.3}
+- mouse_click: {"x": int, "y": int, "button": "left|right", "clicks": 1}
+- type_text: {"text": "string", "interval": 0.05}
+- press_key: {"key": "string"}
+- press_hotkey: {"keys": ["ctrl", "c"]}
+- open_application: {"name": "app_name", "wait": false}
+- list_windows: {}
+- focus_window: {"title": "window_title"}
+- read_screen_text: {"language": "eng", "region": null}
 
 Respond EXACTLY in this format (one action per line):
 ACTION: skill_name | {"arg1": "value1", "arg2": "value2"}
@@ -410,16 +414,16 @@ EXPLANATION: Brief description of what you're doing
 
 Examples:
 User: "open chrome"
-ACTION: app_launcher | {"app": "chrome", "wait": false}
+ACTION: open_application | {"name": "chrome", "wait": false}
 EXPLANATION: Opening Google Chrome browser
 
 User: "take a screenshot"
-ACTION: screenshot | {"monitor": 1, "format": "base64"}
+ACTION: take_screenshot | {"monitor": 1, "format": "base64"}
 EXPLANATION: Taking a screenshot of your desktop
 
 User: "type hello world in notepad"
-ACTION: app_launcher | {"app": "notepad", "wait": true}
-ACTION: keyboard_control | {"action": "type", "text": "hello world"}
+ACTION: open_application | {"name": "notepad", "wait": true}
+ACTION: type_text | {"text": "hello world"}
 EXPLANATION: Opening Notepad and typing hello world"""
             ))
             
@@ -454,23 +458,23 @@ EXPLANATION: Opening Notepad and typing hello world"""
                 # LLM didn't produce parseable actions, try a simple fallback
                 msg_lower = state['user_message'].lower()
                 if any(kw in msg_lower for kw in ['screenshot', 'screen shot', 'capture screen']):
-                    actions = [('screenshot', {'monitor': 1, 'format': 'base64'})]
+                    actions = [('take_screenshot', {'monitor': 1, 'format': 'base64'})]
                     explanation = 'Taking a screenshot'
                 elif any(kw in msg_lower for kw in ['open ', 'launch ', 'start ']):
                     for kw in ['open ', 'launch ', 'start ']:
                         if kw in msg_lower:
                             app_name = msg_lower.split(kw, 1)[1].strip().split()[0] if msg_lower.split(kw, 1)[1].strip() else ''
                             if app_name:
-                                actions = [('app_launcher', {'app': app_name, 'wait': False})]
+                                actions = [('open_application', {'name': app_name, 'wait': False})]
                                 explanation = f'Opening {app_name}'
                             break
                 elif 'type ' in msg_lower:
                     text = state['user_message'].split('type ', 1)[1].strip() if 'type ' in state['user_message'].lower() else ''
                     if text:
-                        actions = [('keyboard_control', {'action': 'type', 'text': text})]
+                        actions = [('type_text', {'text': text})]
                         explanation = 'Typing text'
                 elif any(kw in msg_lower for kw in ['click', 'mouse']):
-                    actions = [('mouse_control', {'action': 'click'})]
+                    actions = [('mouse_click', {'button': 'left'})]
                     explanation = 'Clicking mouse'
             
             # Step 4: Execute each action via desktop bridge

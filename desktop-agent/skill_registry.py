@@ -34,7 +34,39 @@ class SkillRegistry:
             f"{len(agent.get_tools())} tools"
         )
 
-    def get_all_tools(self) -> List[Dict[str, Any]]:
+    def discover_agents(self, agents_dir: str) -> list[str]:
+        """Dynamically discover and load all agents in a directory"""
+        import os
+        import importlib
+        from pathlib import Path
+
+        loaded = []
+        dir_path = Path(agents_dir)
+        if not dir_path.exists():
+            logger.warning(f"Plugin directory {agents_dir} not found")
+            return loaded
+
+        package_name = str(dir_path.name)
+
+        for filename in os.listdir(agents_dir):
+            if filename.endswith("_agent.py") and filename != "base_agent.py":
+                module_name = filename[:-3]
+                try:
+                    module = importlib.import_module(f"{package_name}.{module_name}")
+                    # Find the initialized instance of the agent
+                    for attr_name in dir(module):
+                        attr = getattr(module, attr_name)
+                        if isinstance(attr, BaseAgent):
+                            self.register_agent(attr)
+                            loaded.append(module_name.replace("_agent", ""))
+                            break
+                except Exception as e:
+                    logger.error(f"Failed to auto-load agent {filename}: {e}")
+
+        logger.info(f"✅ Auto-discovered {len(loaded)} plugins: {', '.join(loaded)}")
+        return loaded
+
+    def list_all_tools(self) -> List[Dict[str, Any]]:
         """Get all tool definitions for the LLM (cached)"""
         if not self._tools_cache:
             for agent in self._agents.values():
