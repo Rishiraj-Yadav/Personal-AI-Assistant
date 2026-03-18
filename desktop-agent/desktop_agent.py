@@ -1,65 +1,143 @@
 """
-Desktop Agent Service
-Main HTTP server that exposes desktop control capabilities
-Runs on host machine (not in Docker) to access desktop
+Desktop Agent Service — v2
+Main HTTP server with natural language command endpoint.
+Runs on host machine (not Docker) to access the physical desktop.
 """
 from fastapi import FastAPI, HTTPException, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import uvicorn
 from loguru import logger
 import sys
+import os
 from pathlib import Path
 
-# Add skills to path
+# Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config import settings, save_api_key
-from skills.safety_manager import safety_manager
-from skills.screenshot import screenshot_skill
-from skills.mouse_control import mouse_control_skill
-from skills.keyboard_control import keyboard_control_skill
-from skills.app_launcher import app_launcher_skill
-from skills.window_manager import window_manager_skill
-from skills.screen_reader import screen_reader_skill
+from skill_registry import registry
+from agent_brain import brain
 
 
-# Initialize FastAPI
+# ───── Initialize Agents ─────
+def register_all_agents():
+    """Import and register all specialist agents"""
+    agents_loaded = []
+
+    try:
+        from agents.app_agent import app_agent
+        registry.register_agent(app_agent)
+        agents_loaded.append("app")
+    except Exception as e:
+        logger.warning(f"Failed to load App Agent: {e}")
+
+    try:
+        from agents.shell_agent import shell_agent
+        registry.register_agent(shell_agent)
+        agents_loaded.append("shell")
+    except Exception as e:
+        logger.warning(f"Failed to load Shell Agent: {e}")
+
+    try:
+        from agents.file_agent import file_agent
+        registry.register_agent(file_agent)
+        agents_loaded.append("file")
+    except Exception as e:
+        logger.warning(f"Failed to load File Agent: {e}")
+
+    try:
+        from agents.gui_agent import gui_agent
+        registry.register_agent(gui_agent)
+        agents_loaded.append("gui")
+    except Exception as e:
+        logger.warning(f"Failed to load GUI Agent: {e}")
+
+    try:
+        from agents.system_agent import system_agent
+        registry.register_agent(system_agent)
+        agents_loaded.append("system")
+    except Exception as e:
+        logger.warning(f"Failed to load System Agent: {e}")
+
+    try:
+        from agents.web_agent import web_agent
+        registry.register_agent(web_agent)
+        agents_loaded.append("web")
+    except Exception as e:
+        logger.warning(f"Failed to load Web Agent: {e}")
+
+    try:
+        from agents.scheduler_agent import scheduler_agent
+        registry.register_agent(scheduler_agent)
+        agents_loaded.append("scheduler")
+    except Exception as e:
+        logger.warning(f"Failed to load Scheduler Agent: {e}")
+
+    try:
+        from agents.notification_agent import notification_agent
+        registry.register_agent(notification_agent)
+        agents_loaded.append("notification")
+    except Exception as e:
+        logger.warning(f"Failed to load Notification Agent: {e}")
+
+    logger.info(
+        f"✅ Loaded {len(agents_loaded)}/{8} agents: {', '.join(agents_loaded)}"
+    )
+    return agents_loaded
+
+
+# Register agents at import time
+_loaded_agents = register_all_agents()
+
+
+# ───── FastAPI App ─────
 app = FastAPI(
-    title="Desktop Agent Service",
-    description="Exposes desktop control capabilities via HTTP API",
-    version="1.0.0"
+    title="Desktop Agent v2",
+    description="AI-powered desktop assistant with natural language control",
+    version="2.0.0",
 )
 
-# CORS - allow backend to access this service
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8000", "http://localhost:3000"],
+    allow_origins=["http://localhost:8000", "http://localhost:3000", "*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-# Request/Response Models
+# ───── Request/Response Models ─────
+class NLCommandRequest(BaseModel):
+    """Natural language command request"""
+    command: str
+    context: Optional[str] = None
+
+
+class NLCommandResponse(BaseModel):
+    """Natural language command response"""
+    response: str
+    actions_taken: List[Dict[str, Any]] = []
+    success: bool
+
+
 class SkillExecutionRequest(BaseModel):
-    """Request to execute a skill"""
+    """Direct skill execution request (backward compatible)"""
     skill: str
     args: Dict[str, Any] = {}
     safe_mode: Optional[bool] = None
 
 
 class SkillExecutionResponse(BaseModel):
-    """Response from skill execution"""
+    """Skill execution response"""
     success: bool
     result: Any
     safe_mode: bool = False
-    requires_confirmation: bool = False
-    confirmation_message: Optional[str] = None
+    error: Optional[str] = None
 
 
-# API Key verification
+# ───── Auth ─────
 def verify_api_key(x_api_key: str = Header(...)):
     """Verify API key from header"""
     if x_api_key != settings.API_KEY:
@@ -67,26 +145,18 @@ def verify_api_key(x_api_key: str = Header(...)):
     return x_api_key
 
 
-# Skill registry
-SKILLS = {
-    "screenshot": screenshot_skill,
-    "mouse_control": mouse_control_skill,
-    "keyboard_control": keyboard_control_skill,
-    "app_launcher": app_launcher_skill,
-    "window_manager": window_manager_skill,
-    "screen_reader": screen_reader_skill
-}
-
-
+# ───── Endpoints ─────
 @app.get("/")
 async def root():
-    """Root endpoint"""
+    """Root — status & info"""
     return {
-        "service": "Desktop Agent",
-        "version": "1.0.0",
+        "service": "Desktop Agent v2",
+        "version": "2.0.0",
         "status": "running",
         "safe_mode": settings.SAFE_MODE,
-        "skills": list(SKILLS.keys())
+        "agents": registry.agent_count,
+        "tools": registry.tool_count,
+        "brain": "ready" if brain.model else "not configured",
     }
 
 
@@ -95,191 +165,142 @@ async def health():
     """Health check"""
     return {
         "status": "healthy",
-        "safe_mode": settings.SAFE_MODE,
-        "skills_count": len(SKILLS)
+        "agents_loaded": registry.agent_count,
+        "tools_available": registry.tool_count,
+        "brain_ready": brain.model is not None,
     }
 
 
-@app.get("/skills")
-async def list_skills(api_key: str = Depends(verify_api_key)):
-    """List available skills"""
-    return {
-        "skills": list(SKILLS.keys()),
-        "count": len(SKILLS),
-        "safe_mode": settings.SAFE_MODE
-    }
-
-
-@app.post("/execute", response_model=SkillExecutionResponse)
-async def execute_skill(
-    request: SkillExecutionRequest,
-    api_key: str = Depends(verify_api_key)
+@app.post("/execute-nl", response_model=NLCommandResponse)
+async def execute_natural_language(
+    request: NLCommandRequest,
+    api_key: str = Depends(verify_api_key),
 ):
     """
-    Execute a desktop control skill
-    
-    Args:
-        request: Skill execution request
-        
-    Returns:
-        Execution result
+    Execute a natural language command.
+    The Orchestrator Agent Brain will plan and execute the necessary steps.
     """
     try:
-        skill_name = request.skill
-        args = request.args
-        
-        # Check if skill exists
-        if skill_name not in SKILLS:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Skill not found: {skill_name}"
-            )
-        
-        # Override safe mode if requested
-        safe_mode = request.safe_mode if request.safe_mode is not None else settings.SAFE_MODE
-        
-        # Safety check
-        safety_check = safety_manager.validate_action(skill_name, args)
-        
-        if not safety_check["safe"] and not safety_check.get("safe_mode"):
-            # Action blocked or requires confirmation
-            if safety_check.get("blocked"):
-                raise HTTPException(
-                    status_code=403,
-                    detail=safety_check["reason"]
-                )
-            
-            if safety_check["requires_confirmation"]:
-                # Return confirmation required
-                return SkillExecutionResponse(
-                    success=False,
-                    result=None,
-                    requires_confirmation=True,
-                    confirmation_message=safety_check["confirmation_message"]
-                )
-        
-        # Execute skill
-        if safe_mode:
-            # Safe mode - just log, don't execute
-            logger.info(f"SAFE MODE: Would execute {skill_name} with args: {args}")
-            result = {
-                "success": True,
-                "message": f"Safe mode: {skill_name} would be executed",
-                "args": args
-            }
-            success = True
-        else:
-            # Execute for real
-            skill = SKILLS[skill_name]
-            result = skill.execute(args)
-            success = result.get("success", False)
-        
-        # Log action
-        safety_manager.log_action(skill_name, args, result, success)
-        
-        return SkillExecutionResponse(
-            success=success,
-            result=result,
-            safe_mode=safe_mode
+        logger.info(f"📨 NL Command: {request.command}")
+        result = await brain.process_command(request.command)
+
+        return NLCommandResponse(
+            response=result["response"],
+            actions_taken=result.get("actions_taken", []),
+            success=result.get("success", False),
         )
-    
-    except HTTPException:
-        raise
     except Exception as e:
-        logger.error(f"Execution error: {str(e)}")
+        logger.error(f"NL execution error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/history")
-async def get_history(
-    limit: int = 100,
-    api_key: str = Depends(verify_api_key)
+@app.post("/execute", response_model=SkillExecutionResponse)
+async def execute_skill_direct(
+    request: SkillExecutionRequest,
+    api_key: str = Depends(verify_api_key),
 ):
-    """Get action history"""
+    """
+    Direct skill execution (backward compatible with v1 API).
+    Bypasses the brain — calls the skill directly.
+    """
+    try:
+        result = registry.execute_tool(request.skill, request.args)
+        return SkillExecutionResponse(
+            success=result.get("success", False),
+            result=result.get("result"),
+            safe_mode=request.safe_mode or settings.SAFE_MODE,
+            error=result.get("error"),
+        )
+    except Exception as e:
+        logger.error(f"Direct execution error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/capabilities")
+async def list_capabilities(api_key: str = Depends(verify_api_key)):
+    """List all agents, their tools, and descriptions"""
     return {
-        "history": safety_manager.get_action_history(limit=limit),
-        "count": len(safety_manager.action_history)
+        "agents": registry.list_agents(),
+        "total_tools": registry.tool_count,
     }
 
 
-@app.post("/emergency_stop")
+@app.post("/clear-history")
+async def clear_history(api_key: str = Depends(verify_api_key)):
+    """Clear the brain's conversation history"""
+    brain.clear_history()
+    return {"success": True, "message": "Conversation history cleared"}
+
+
+@app.post("/emergency-stop")
 async def emergency_stop(api_key: str = Depends(verify_api_key)):
-    """Emergency stop - enable safe mode"""
+    """Emergency stop — enable safe mode"""
     settings.SAFE_MODE = True
-    logger.warning("EMERGENCY STOP ACTIVATED - Safe mode enabled")
-    
-    return {
-        "success": True,
-        "message": "Safe mode activated. No actions will be executed.",
-        "safe_mode": True
-    }
+    logger.warning("🚨 EMERGENCY STOP — Safe mode enabled")
+    return {"success": True, "safe_mode": True}
 
 
 @app.post("/resume")
 async def resume(api_key: str = Depends(verify_api_key)):
-    """Resume operations - disable safe mode"""
+    """Resume operations — disable safe mode"""
     settings.SAFE_MODE = False
-    logger.info("Operations resumed - Safe mode disabled")
-    
-    return {
-        "success": True,
-        "message": "Safe mode disabled. Actions will be executed.",
-        "safe_mode": False
-    }
+    logger.info("▶️ Resumed — Safe mode disabled")
+    return {"success": True, "safe_mode": False}
 
 
+# ───── Startup ─────
 def startup_banner():
-    """Print startup banner with important info"""
-    print("\n" + "="*60)
-    print("🖥️  DESKTOP AGENT SERVICE")
-    print("="*60)
-    print(f"Version: 1.0.0")
+    """Print startup banner"""
+    print("\n" + "=" * 60)
+    print("🤖  DESKTOP AGENT v2 — AI Desktop Assistant")
+    print("=" * 60)
     print(f"Host: {settings.HOST}:{settings.PORT}")
-    print(f"Safe Mode: {'ENABLED ✓' if settings.SAFE_MODE else 'DISABLED ⚠️'}")
-    print(f"Confirmation Required: {settings.REQUIRE_CONFIRMATION}")
-    print(f"Available Skills: {', '.join(SKILLS.keys())}")
-    print("="*60)
-    
-    if not settings.SAFE_MODE:
-        print("⚠️  WARNING: Safe mode is DISABLED!")
-        print("   This service can control your computer!")
-        print("   Press Ctrl+C to stop")
-    else:
-        print("✓ Safe mode is ENABLED")
-        print("  Actions will be logged but not executed")
-        print("  Use /resume endpoint to disable safe mode")
-    
-    print("="*60)
+    print(f"Brain: {'Gemini Flash ✓' if brain.model else '❌ NOT CONFIGURED'}")
+    print(f"Agents: {registry.agent_count} loaded")
+    print(f"Tools: {registry.tool_count} available")
+    print(f"Safe Mode: {'ON ✓' if settings.SAFE_MODE else 'OFF ⚠️'}")
+    print("=" * 60)
     print(f"API Key: {settings.API_KEY[:20]}...")
-    print(f"Key saved to: config/api_key.txt")
-    print("="*60 + "\n")
+    print("=" * 60)
+
+    if not brain.model:
+        print("\n⚠️  Set GOOGLE_API_KEY in .env.desktop to enable the brain!")
+
+    # List all agents
+    for agent_info in registry.list_agents():
+        print(f"  • {agent_info['name']}: {', '.join(agent_info['tools'])}")
+
+    print("=" * 60 + "\n")
 
 
 if __name__ == "__main__":
     # Setup logging
+    os.makedirs("logs", exist_ok=True)
+    os.makedirs("data", exist_ok=True)
+
     logger.remove()
     logger.add(
         sys.stderr,
         format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>",
-        level=settings.LOG_LEVEL
+        level=settings.LOG_LEVEL,
     )
     logger.add(
         settings.LOG_FILE,
         rotation="1 day",
         retention="7 days",
-        level=settings.LOG_LEVEL
+        level=settings.LOG_LEVEL,
     )
-    
+
     # Save API key
     save_api_key()
-    
+
     # Show startup banner
     startup_banner()
-    
+
     # Start server
     uvicorn.run(
         app,
         host=settings.HOST,
         port=settings.PORT,
-        log_level=settings.LOG_LEVEL.lower()
+        log_level=settings.LOG_LEVEL.lower(),
     )
