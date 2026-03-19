@@ -26,8 +26,10 @@ class AgentBrain:
             model_name="gemini-2.0-flash",
             system_instruction=(
                 "You are an active sub-agent executing a delegated task. "
-                "Use your provided tools to solve the user's request. "
-                "If you need to click something, use the screen visual tool to get coordinates first."
+                "ALWAYS execute the user's request immediately using your tools. Do NOT ask for confirmation or clarification — just DO it. "
+                "If the user says 'open youtube', call open_url('youtube') immediately. "
+                "If the user says 'open youtube and search for X', call open_url('youtube'), then use take_screenshot, find_element_coordinates_on_screen to locate the search box, mouse_click on it, type_text the query, and press_key('enter'). "
+                "CRITICAL: NEVER blindly type text without clicking first! You MUST use take_screenshot + find_element_coordinates_on_screen + mouse_click to guarantee keyboard focus BEFORE using type_text."
             )
         )
         
@@ -49,23 +51,28 @@ class AgentBrain:
         logger.info(f"🚀 Routing handoff to: {target_agent_name}_agent")
 
         # 2. Get the specific agent and its tools
-        target_agent = None
-        for name, agent in registry._agents.items():
-            if name == target_agent_name or name == f"{target_agent_name}_agent":
-                target_agent = agent
-                break
-                
-        # Fallback to all tools if router failed or returned 'system' and system agent isn't found
+        # 'system' from router means "use ALL tools" (cross-agent task)
         gemini_tools = []
-        if target_agent:
-            tools = target_agent.get_tools()
-            for t in tools:
-                gemini_tools.append(self._format_tool(t))
-            logger.info(f"Loaded {len(tools)} tools exclusively for {target_agent.name}")
-        else:
-            logger.warning(f"Could not isolate {target_agent_name}, loading fallback global tools")
-            for t in registry.get_all_tools():
+        if target_agent_name == "system":
+            logger.info("🌐 Router selected 'system' — loading ALL tools for cross-agent task")
+            for t in registry.list_all_tools():
                 gemini_tools.append(self._format_tool(t["function"]))
+        else:
+            target_agent = None
+            for name, agent in registry._agents.items():
+                if name == target_agent_name or name == f"{target_agent_name}_agent":
+                    target_agent = agent
+                    break
+
+            if target_agent:
+                tools = target_agent.get_tools()
+                for t in tools:
+                    gemini_tools.append(self._format_tool(t))
+                logger.info(f"Loaded {len(tools)} tools exclusively for {target_agent.name}")
+            else:
+                logger.warning(f"Could not isolate {target_agent_name}, loading fallback global tools")
+                for t in registry.list_all_tools():
+                    gemini_tools.append(self._format_tool(t["function"]))
 
         # Build tool config
         tools_param = None

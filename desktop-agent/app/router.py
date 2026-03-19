@@ -24,6 +24,7 @@ class RouterAgent:
             system_instruction=(
                 "You are an intelligent routing engine. Your job is to classify "
                 "the user's command and map it to exactly ONE of the available agents.\n"
+                "If the command requires tools from multiple different agents (like launching an app AND clicking inside it), return 'system'.\n"
                 "You MUST output raw JSON containing a single key 'agent_name'."
             )
         )
@@ -53,7 +54,12 @@ Available Agents:
 User Command: {command}
 Context: {context or 'None'}
 
-Determine the best agent to handle this command. 
+IMPORTANT routing rules:
+- If the user wants to OPEN a website (youtube, google, github, etc.) → use "app" (it has the open_url tool)
+- If the command involves BOTH opening an app/website AND interacting with it (clicking, typing, searching inside it) → use "system" (to get all tools)
+- If the command is purely about GUI interaction (clicking, typing, screenshots) on an already-open app → use "gui"
+
+Determine the best agent to handle this command.
 Return ONLY JSON format: {{"agent_name": "<name>"}}
 """
         try:

@@ -18,11 +18,19 @@ class RouterAgent:
     # Pre-compiled patterns for fast-path routing (catches typos too)
     _WEB_FAST_PATTERNS = re.compile(
         r'brows|open\s+.{0,6}brows|'             # browser / broswer / browsr etc.
-        r'leetcode|amazon|flipkart|github|'
+        r'leetcode|amazon|flipkart|youtube|github|'
         r'stackoverflow|wikipedia|reddit|twitter|'
         r'linkedin|facebook|instagram|netflix|'
         r'\.com\b|\.org\b|\.io\b|\.net\b|\.dev\b|'
         r'https?://|www\.',
+        re.IGNORECASE
+    )
+
+    # Catches "open youtube", "open google", etc. → DESKTOP (physical browser)
+    _OPEN_WEBSITE_PATTERN = re.compile(
+        r'open\s+(?:youtube|google|github|gmail|reddit|twitter|linkedin|'
+        r'facebook|instagram|amazon|flipkart|wikipedia|stackoverflow|'
+        r'leetcode|netflix|spotify|chatgpt|whatsapp)',
         re.IGNORECASE
     )
     
@@ -42,6 +50,16 @@ class RouterAgent:
         Classify task with user context and conversation history.
         """
         
+        # ── Fast-path: "open [website]" → DESKTOP (physical browser) ──
+        if self._OPEN_WEBSITE_PATTERN.search(user_message):
+            logger.info("🎯 Fast-path: detected 'open + website' → DESKTOP (physical browser)")
+            return {
+                "task_type": "desktop",
+                "confidence": 0.95,
+                "reasoning": "User wants to physically open a website in their browser",
+                "next_agent": "desktop_specialist"
+            }
+
         # ── Fast-path: if message mentions browser/website, skip LLM ──
         if self._WEB_FAST_PATTERNS.search(user_message):
             logger.info("🎯 Fast-path: detected browser/website → web_autonomous")
@@ -81,7 +99,7 @@ Analyze this request and classify it into ONE category:
    NOTE: DESKTOP is ONLY for controlling the user's physical computer. Do NOT use DESKTOP when the user wants to visit a website or browse the web.
    
 3. WEB_AUTONOMOUS - Autonomously browse the web, research topics, interact with web pages, fill forms, compare products, book things, perform multi-step web tasks
-   Triggers: "browse", "browser", "open browser", "search the web", "go to", "visit", "look up", "research", "compare", "book", "check price", "find flights", "order", "search for", "find me", "show me", "look for", "web search", "google", "browse to", "open website", "fill form", "sign up on", "buy", "purchase", "leetcode", "amazon", "wikipedia", "github"
+   Triggers: "browse", "browser", "open browser", "search the web", "go to", "visit", "look up", "research", "compare", "book", "check price", "find flights", "order", "search for", "find me", "show me", "look for", "web search", "google", "browse to", "open website", "fill form", "sign up on", "buy", "purchase", "leetcode", "amazon", "wikipedia", "youtube", "github"
    Examples: "open browser on leetcode", "search the web for best laptops 2026", "go to amazon and find AirPods price", "research AI news", "compare flights to NYC", "visit wikipedia and summarize the page about Mars", "open browser and go to github"
 
 4. WEB - Simple scrape/weather/data fetch (no browsing needed)
@@ -104,8 +122,9 @@ IMPORTANT RULES:
 - If user mentions code/programming/app/API → CODING
 - If user mentions file paths like "R:/..." → CODING
 - If user says "create", "make", "build" + tech term → CODING
-- "open browser", "browser", or any mention of a website name (leetcode, amazon, google, github, etc.) → WEB_AUTONOMOUS (NOT desktop!)
-- If the user asks to open or search YouTube → DESKTOP (so it opens locally on host)
+- If user says "open" + a website name (youtube, google, amazon, etc.) → DESKTOP (this opens the physical browser on their computer)
+- If user says "browse", "search on", "research", "go to" + website → WEB_AUTONOMOUS (headless web interaction)
+- "open browser" without a specific site → WEB_AUTONOMOUS
 - If user wants to browse, search, research, visit a website, or do anything involving web pages → WEB_AUTONOMOUS
 - If user just wants a simple scrape or weather check → WEB
 - If user mentions email/mail/inbox → EMAIL
@@ -184,8 +203,7 @@ Classify now:"""
             "click", "screenshot", "mouse",
             "keyboard", "window", "minimize", "maximize",
             "launch app", "launch vs", "launch notepad",
-            "take screenshot", "move mouse", "press key",
-            "youtube", "open youtube"
+            "take screenshot", "move mouse", "press key"
         ]
         
         # Web autonomous keywords (browsing, research, interaction)
@@ -198,8 +216,25 @@ Classify now:"""
             "buy online", "purchase online"
         ]
         
+        # "open [website]" → DESKTOP (physical browser launch)
         website_names = [
-            "leetcode", "amazon", "flipkart", "github",
+            "youtube", "google", "github", "gmail", "reddit", "twitter",
+            "linkedin", "facebook", "instagram", "amazon", "flipkart",
+            "wikipedia", "stackoverflow", "leetcode", "netflix",
+            "spotify", "chatgpt", "whatsapp"
+        ]
+        for site in website_names:
+            if site in message_lower and re.search(r'open\s+', message_lower):
+                return {
+                    "task_type": "desktop",
+                    "confidence": 0.95,
+                    "reasoning": "User wants to open a website in their physical browser",
+                    "next_agent": "desktop_specialist"
+                }
+
+        # Known website names without "open" → web_autonomous
+        web_site_triggers = [
+            "leetcode", "amazon", "flipkart", "youtube", "github",
             "stackoverflow", "wikipedia", "reddit", "twitter",
             "linkedin", "facebook", "instagram", "netflix",
             ".com", ".org", ".io", ".net", ".dev", "http"
@@ -222,9 +257,8 @@ Classify now:"""
             "remind", "reminder", "what's on"
         ]
         
-        # Check keywords — order matters: web_auto + website names first
-        # Website names always → web_autonomous
-        if any(kw in message_lower for kw in website_names):
+        # Check keywords — order matters: website names without "open" → web_autonomous
+        if any(kw in message_lower for kw in web_site_triggers):
             return {
                 "task_type": "web_autonomous",
                 "confidence": 0.90,

@@ -223,7 +223,7 @@ async def node_tools(api_key: str = Depends(verify_api_key)):
     Return tool declarations in a node-friendly format.
     For now, we reuse the registry tools as-is; the Gateway will normalize schemas.
     """
-    tools_raw = registry.get_all_tools()
+    tools_raw = registry.list_all_tools()
     # Flatten to keep it lightweight for the Gateway.
     flat = []
     for item in tools_raw:

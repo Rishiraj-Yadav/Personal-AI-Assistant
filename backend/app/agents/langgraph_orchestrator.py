@@ -396,6 +396,7 @@ class LangGraphOrchestrator:
                 content="""You are a Desktop Control Agent. Parse the user's request into ONE OR MORE desktop actions.
 
 Available skills and their arguments:
+- open_url: {"url": "youtube"} — Opens a website name or URL in the system's default browser. Supports well-known names like youtube, google, github, etc.
 - take_screenshot: {"region": null, "monitor": 1, "format": "base64"}
 - mouse_move: {"x": int, "y": int, "duration": 0.3}
 - mouse_click: {"x": int, "y": int, "button": "left|right", "clicks": 1}
@@ -413,6 +414,10 @@ ACTION: skill_name | {"arg1": "value1"}
 EXPLANATION: Brief description of what you're doing
 
 Examples:
+User: "open youtube"
+ACTION: open_url | {"url": "youtube"}
+EXPLANATION: Opening YouTube in the default browser
+
 User: "open chrome"
 ACTION: open_application | {"name": "chrome", "wait": false}
 EXPLANATION: Opening Google Chrome browser

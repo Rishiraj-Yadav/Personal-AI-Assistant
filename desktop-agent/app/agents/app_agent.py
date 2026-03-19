@@ -4,6 +4,7 @@ App Agent — Launch, close, and discover applications
 import os
 import subprocess
 import shutil
+import webbrowser
 import glob
 from typing import Dict, Any, List
 from loguru import logger
@@ -13,10 +14,33 @@ from agents.base_agent import BaseAgent
 class AppAgent(BaseAgent):
     """Agent for application management — smart discovery, launch, close"""
 
+    # Well-known website names → URLs
+    KNOWN_WEBSITES: Dict[str, str] = {
+        "youtube": "https://www.youtube.com",
+        "google": "https://www.google.com",
+        "github": "https://www.github.com",
+        "gmail": "https://mail.google.com",
+        "reddit": "https://www.reddit.com",
+        "twitter": "https://www.twitter.com",
+        "x": "https://www.x.com",
+        "linkedin": "https://www.linkedin.com",
+        "facebook": "https://www.facebook.com",
+        "instagram": "https://www.instagram.com",
+        "amazon": "https://www.amazon.com",
+        "flipkart": "https://www.flipkart.com",
+        "wikipedia": "https://www.wikipedia.org",
+        "stackoverflow": "https://stackoverflow.com",
+        "leetcode": "https://leetcode.com",
+        "netflix": "https://www.netflix.com",
+        "spotify": "https://open.spotify.com",
+        "chatgpt": "https://chat.openai.com",
+        "whatsapp": "https://web.whatsapp.com",
+    }
+
     def __init__(self):
         super().__init__(
             name="app_agent",
-            description="Launch, close, and discover applications, folders, and URLs"
+            description="Launch, close, and discover applications, folders, and URLs. Can open websites like YouTube, Google, GitHub etc. in the system's default browser."
         )
         self._app_cache: Dict[str, str] = {}
         self._build_app_cache()
@@ -203,6 +227,20 @@ class AppAgent(BaseAgent):
                     "required": ["name"],
                 },
             },
+            {
+                "name": "open_url",
+                "description": "Open a URL or a well-known website name (like 'youtube', 'google', 'github') in the system's default web browser",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": {
+                            "type": "string",
+                            "description": "A full URL (e.g., 'https://youtube.com') or a website name (e.g., 'youtube', 'google', 'github')",
+                        },
+                    },
+                    "required": ["url"],
+                },
+            },
         ]
 
     def execute(self, tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -216,6 +254,8 @@ class AppAgent(BaseAgent):
             return self._list_running()
         elif tool_name == "is_app_running":
             return self._is_running(args.get("name", ""))
+        elif tool_name == "open_url":
+            return self._open_url(args.get("url", ""))
         return self._error(f"Unknown tool: {tool_name}")
 
     def _open_app(self, name: str) -> Dict[str, Any]:
@@ -240,16 +280,14 @@ class AppAgent(BaseAgent):
             except Exception as e:
                 return self._error(f"Failed to open folder '{resolved_folder}': {e}")
 
+        # Check if it's a well-known website name
+        name_lower = name.lower().strip()
+        if name_lower in self.KNOWN_WEBSITES:
+            return self._open_url(name_lower)
+
         # Check if it's a URL
         if name.startswith(("http://", "https://", "www.")):
-            try:
-                os.startfile(name)
-                return self._success(
-                    {"opened": name, "type": "url"},
-                    f"Opened URL: {name}",
-                )
-            except Exception as e:
-                return self._error(f"Failed to open URL: {e}")
+            return self._open_url(name)
 
         # Check if it's a folder path
         if os.path.isdir(name):
@@ -312,6 +350,34 @@ class AppAgent(BaseAgent):
                 f"Could not find application '{name}'. "
                 f"Available apps include: {', '.join(list(self._app_cache.keys())[:20])}"
             )
+
+    def _open_url(self, url: str) -> Dict[str, Any]:
+        """Open a URL or well-known website name in the system's default browser"""
+        if not url:
+            return self._error("No URL provided")
+
+        url_lower = url.lower().strip()
+
+        # Resolve well-known website names
+        if url_lower in self.KNOWN_WEBSITES:
+            resolved_url = self.KNOWN_WEBSITES[url_lower]
+            logger.info(f"🌐 Resolved '{url_lower}' → {resolved_url}")
+        elif url.startswith(("http://", "https://")):
+            resolved_url = url
+        elif url.startswith("www."):
+            resolved_url = f"https://{url}"
+        else:
+            # Try adding https:// as a guess
+            resolved_url = f"https://www.{url_lower}.com"
+
+        try:
+            webbrowser.open(resolved_url)
+            return self._success(
+                {"opened": resolved_url, "type": "url", "original_input": url},
+                f"Opened {resolved_url} in default browser",
+            )
+        except Exception as e:
+            return self._error(f"Failed to open URL '{resolved_url}': {e}")
 
     def _open_special_folder(self, folder: str) -> Dict[str, Any]:
         key = (folder or "").strip().lower()

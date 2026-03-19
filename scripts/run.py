@@ -19,7 +19,7 @@ import importlib
 from pathlib import Path
 
 # ───── Project paths ─────
-PROJECT_ROOT = Path(__file__).parent
+PROJECT_ROOT = Path(__file__).parent.parent
 DESKTOP_AGENT_DIR = PROJECT_ROOT / "desktop-agent"
 ENV_FILE = PROJECT_ROOT / ".env"
 DESKTOP_ENV_FILE = DESKTOP_AGENT_DIR / ".env.desktop"
