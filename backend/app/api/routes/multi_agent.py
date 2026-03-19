@@ -2,7 +2,7 @@
 Multi-Agent API Routes - Enhanced with LangGraph + Memory + Slash Commands
 """
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
 from loguru import logger
 from datetime import datetime, timezone
@@ -37,6 +37,10 @@ class MultiAgentResponse(BaseModel):
     server_port: Optional[int] = None
     language: Optional[str] = None
     metadata: Dict[str, Any]
+    plan: Optional[Dict[str, Any]] = None
+    execution_trace: List[Dict[str, Any]] = Field(default_factory=list)
+    approval_state: Optional[Dict[str, Any]] = None
+    artifacts: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
     agent_path: List[str]
 
@@ -87,6 +91,10 @@ async def generate_code(request: MultiAgentRequest):
             server_port=result.get("server_port"),
             language=result.get("language"),
             metadata=result.get("metadata", {}),
+            plan=result.get("plan"),
+            execution_trace=result.get("execution_trace", []),
+            approval_state=result.get("approval_state"),
+            artifacts=result.get("artifacts"),
             error=result.get("error"),
             agent_path=result.get("agent_path", [])
         )
@@ -143,6 +151,9 @@ async def code_generation_stream(websocket: WebSocket):
                     "message": msg_data.get("message", ""),
                     "timestamp": datetime.now(timezone.utc).isoformat()
                 }
+                for key, value in msg_data.items():
+                    if key not in {"type", "message"}:
+                        payload[key] = value
                 # Forward web agent specific data
                 if msg_data.get("type", "").startswith("web_agent_"):
                     if "action" in msg_data:
@@ -208,6 +219,10 @@ async def code_generation_stream(websocket: WebSocket):
                 "language": result.get("language"),
                 "metadata": result.get("metadata"),
                 "agent_path": result.get("agent_path"),
+                "plan": result.get("plan"),
+                "execution_trace": result.get("execution_trace", []),
+                "approval_state": result.get("approval_state"),
+                "artifacts": result.get("artifacts"),
                 "web_screenshots": result.get("metadata", {}).get("web_screenshots", []),
                 "web_current_url": result.get("metadata", {}).get("web_current_url", ""),
                 "web_autonomous": result.get("metadata", {}).get("web_autonomous", False),

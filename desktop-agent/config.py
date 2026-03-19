@@ -1,6 +1,6 @@
 """
 Desktop Agent Configuration
-Security and behavior settings
+Isolated settings — reads from .env.desktop only
 """
 from pydantic_settings import BaseSettings
 from typing import List
@@ -10,83 +10,86 @@ import os
 
 class DesktopAgentSettings(BaseSettings):
     """Desktop Agent configuration"""
-    
+
+    # LLM Brain
+    GOOGLE_API_KEY: str = ""
+
     # Server settings
-    HOST: str = "127.0.0.1"  # Only localhost for security
+    HOST: str = "127.0.0.1"
     PORT: int = 7777
-    # API_KEY loaded from .env (API_KEY=...) or auto-generated
     API_KEY: str = ""
-    
+
     # Safety settings
-    SAFE_MODE: bool = False  # True = log only, don't execute
-    # SAFE_MODE: bool = True  # True = log only, don't execute
-    REQUIRE_CONFIRMATION: bool = True  # Ask before dangerous actions
+    SAFE_MODE: bool = False
+    REQUIRE_CONFIRMATION: bool = True
     LOG_ALL_ACTIONS: bool = True
-    
+
     # Action timeouts (seconds)
     ACTION_TIMEOUT: int = 30
     SCREENSHOT_TIMEOUT: int = 5
     APP_LAUNCH_TIMEOUT: int = 10
-    
-    # Allowed applications (whitelist)
-    ALLOWED_APPS: List[str] = [
-        "chrome", "firefox", "safari", "edge",
-        "notepad", "textedit", "gedit",
-        "code", "vscode", "sublime",
-        "terminal", "iterm", "cmd",
-        "calculator", "calendar",
-        "slack", "discord", "zoom",
-         "task manager", "taskmgr", "taskmanager"  # ADD THIS LINE
+
+    # Allowed safe paths for file operations
+    SAFE_PATHS: List[str] = [
+        os.path.expanduser("~/Desktop"),
+        os.path.expanduser("~/Documents"),
+        os.path.expanduser("~/Downloads"),
     ]
-    
-    # Blocked applications (blacklist) - takes precedence
+
+    # Blocked commands (for shell executor)
+    BLOCKED_COMMANDS: List[str] = [
+        "format", "diskpart", "del /s /q C:",
+        "Remove-Item -Recurse -Force C:",
+        "rd /s /q C:", "shutdown", "restart",
+    ]
+
+    # Blocked applications
     BLOCKED_APPS: List[str] = [
         "regedit", "registry",
         "format", "diskpart",
-        "rm", "dd",  # Dangerous Unix commands
-        "sudo"
     ]
-    
+
     # Dangerous keywords requiring confirmation
     DANGER_KEYWORDS: List[str] = [
         "delete", "remove", "format", "wipe",
         "install", "uninstall",
         "shutdown", "restart", "reboot",
         "permission", "admin", "root",
-        "password", "credential",
-        "bank", "payment", "purchase"
     ]
-    
+
     # Screen boundaries
     MAX_SCREEN_WIDTH: int = 4096
     MAX_SCREEN_HEIGHT: int = 2160
-    
+
     # Mouse settings
-    MOUSE_MOVE_DURATION: float = 0.3  # Seconds for smooth movement
+    MOUSE_MOVE_DURATION: float = 0.3
     CLICK_DELAY: float = 0.1
-    
+
     # Keyboard settings
-    TYPING_INTERVAL: float = 0.05  # Delay between keystrokes
-    
+    TYPING_INTERVAL: float = 0.05
+
     # OCR settings
     OCR_ENABLED: bool = True
     OCR_LANGUAGE: str = "eng"
-    
+
     # Logging
     LOG_FILE: str = "logs/desktop_agent.log"
     LOG_LEVEL: str = "INFO"
-    
+
+    # Scheduler
+    SCHEDULER_DATA_FILE: str = "data/scheduled_tasks.json"
+
     class Config:
-        env_file = ".env"
+        env_file = ".env.desktop"
         case_sensitive = True
+        extra = "ignore"
 
 
 # Global settings instance
 _settings = DesktopAgentSettings()
 
-# If no API_KEY was loaded from env/.env, auto-generate one
+# If no API_KEY was loaded, auto-generate one
 if not _settings.API_KEY:
-    # Check DESKTOP_AGENT_API_KEY env var as fallback
     _desktop_key = os.environ.get("DESKTOP_AGENT_API_KEY", "").strip()
     if _desktop_key:
         _settings.API_KEY = _desktop_key
@@ -96,9 +99,9 @@ if not _settings.API_KEY:
 settings = _settings
 
 
-# Save API key to file for backend to use
 def save_api_key():
     """Save generated API key to file"""
+    os.makedirs("config", exist_ok=True)
     with open("config/api_key.txt", "w") as f:
         f.write(settings.API_KEY)
 
@@ -106,4 +109,7 @@ def save_api_key():
 if __name__ == "__main__":
     save_api_key()
     print(f"API Key: {settings.API_KEY}")
-    print("Saved to: config/api_key.txt")
+    print(f"Google API Key: {'SET' if settings.GOOGLE_API_KEY else 'MISSING'}")
+    print(f"Host: {settings.HOST}:{settings.PORT}")
+    print(f"Safe Mode: {settings.SAFE_MODE}")
+    print(f"Saved to: config/api_key.txt")

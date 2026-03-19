@@ -6,11 +6,21 @@ All agents: coding, desktop, web, general
 from typing import Dict, Any, TypedDict, List, Annotated, Optional, Callable
 from datetime import datetime, timezone, timedelta
 import operator
+import uuid
 from loguru import logger
 
 from langgraph.graph import StateGraph, END
 
 from app.agents.router_agent import router_agent
+from app.agents.orchestration_models import (
+    AgentHandoff,
+    ApprovalRequest,
+    ExecutionPlan,
+    ExecutionTraceEvent,
+    PlanStep,
+    TaskAnalysis,
+    TaskEnvelope,
+)
 from app.services.context_builder import context_builder
 from app.services.enhanced_memory_service import enhanced_memory_service
 from app.core.llm import llm_adapter
@@ -1403,21 +1413,16 @@ EXPLANATION: Brief description"""
         
         return state
     
-    # ===== PUBLIC INTERFACE =====
-    
-    async def process(
+    def _build_initial_state(
         self,
         user_message: str,
         user_id: str,
         conversation_id: str,
-        max_iterations: int = 3,
-        message_callback: Optional[Callable] = None
-    ) -> Dict[str, Any]:
-        """Process user message through graph"""
-        logger.info(f"🚀 Processing: '{user_message[:50]}...'")
-        
-        # Initialize state
-        initial_state = {
+        max_iterations: int,
+        message_callback: Optional[Callable] = None,
+    ) -> AgentState:
+        """Build a fresh orchestration state for the new planner/executor flow."""
+        initial_state: AgentState = {
             'user_message': user_message,
             'user_id': user_id,
             'conversation_id': conversation_id,
@@ -1433,7 +1438,9 @@ EXPLANATION: Brief description"""
             'errors': [],
             'final_output': '',
             'success': False,
-            'metadata': {},
+            'metadata': {
+                'original_user_message': user_message,
+            },
             'code': '',
             'files': {},
             'language': '',
@@ -1442,54 +1449,581 @@ EXPLANATION: Brief description"""
             'web_screenshots': [],
             'web_actions': [],
             'web_current_url': '',
-            'web_permission_needed': {}
+            'web_permission_needed': {},
         }
-        
-        # Pass message callback via metadata for agents that need it
         if message_callback:
             initial_state['metadata']['_message_callback'] = message_callback
-        
+        return initial_state
+
+    def _detect_channel(self, user_id: str) -> str:
+        """Infer request channel from user identity."""
+        if user_id.startswith("telegram_"):
+            return "telegram"
+        if user_id.startswith("web_"):
+            return "web"
+        return "api"
+
+    async def _emit_progress(
+        self,
+        message_callback: Optional[Callable],
+        event_type: str,
+        message: str,
+        **data: Any,
+    ) -> None:
+        """Forward orchestration lifecycle events to transport layers."""
+        if not message_callback:
+            return
+        payload = {"type": event_type, "message": message}
+        payload.update(data)
         try:
-            # Execute graph
-            result = await self.graph.ainvoke(initial_state)
-            
-            # Build response — drop non-serializable keys
-            extra_metadata = {
-                k: v for k, v in result.get('metadata', {}).items()
-                if not callable(v) and not k.startswith('_')
+            await message_callback(payload)
+        except Exception as exc:
+            logger.warning(f"⚠️ Progress callback failed for {event_type}: {exc}")
+
+    def _assess_approval(self, user_message: str, task_type: str) -> ApprovalRequest:
+        """Apply guarded auto-run rules at the orchestrator layer."""
+        message_lower = user_message.lower()
+
+        destructive_keywords = [
+            "delete", "remove", "erase", "format", "shutdown", "reboot",
+            "kill process", "trash", "send email", "purchase", "buy",
+            "checkout", "payment", "submit", "post publicly", "deploy to production",
+            "git push", "git commit", "revoke", "archive email",
+        ]
+        desktop_sensitive = ["type password", "enter password", "close all", "delete file"]
+
+        requires_approval = any(keyword in message_lower for keyword in destructive_keywords)
+        if task_type == "desktop" and any(keyword in message_lower for keyword in desktop_sensitive):
+            requires_approval = True
+
+        if requires_approval:
+            return ApprovalRequest(
+                required=True,
+                approval_level="confirm",
+                reason="The request includes a destructive or externally committed action.",
+            )
+
+        return ApprovalRequest(required=False, approval_level="none", reason="")
+
+    def _build_task_analysis(self, envelope: TaskEnvelope, state: AgentState) -> TaskAnalysis:
+        """Normalize routing, permissions, and risk into a single analysis object."""
+        from app.services.permission_service import permission_service
+
+        routing = router_agent.classify_task(
+            user_message=envelope.user_message,
+            user_context=state.get('user_context', ''),
+            conversation_history=state.get('conversation_history', []),
+        )
+        task_type = routing.get('task_type', 'general')
+        approval = self._assess_approval(envelope.user_message, task_type)
+
+        allowed, access_reason = permission_service.check_agent_access(envelope.user_id, task_type)
+        rate_allowed, rate_reason = permission_service.check_rate_limit(envelope.user_id)
+
+        blocked = False
+        blocked_reason = ""
+        if not rate_allowed:
+            blocked = True
+            blocked_reason = rate_reason
+        elif not allowed:
+            blocked = True
+            blocked_reason = access_reason
+
+        risk_level = "low"
+        if approval.required:
+            risk_level = "high"
+        elif task_type in {"desktop", "email", "calendar", "web_autonomous"}:
+            risk_level = "medium"
+
+        return TaskAnalysis(
+            task_type=task_type,
+            confidence=routing.get('confidence', 0.0),
+            reasoning=routing.get('reasoning', ''),
+            risk_level=risk_level,
+            required_capabilities=[task_type],
+            blocked=blocked,
+            blocked_reason=blocked_reason,
+            approval=approval,
+        )
+
+    def _requires_research_step(self, user_message: str, task_type: str) -> bool:
+        """Detect when a coding request should explicitly gather web context first."""
+        if task_type != "coding":
+            return False
+        research_keywords = [
+            "research", "docs", "documentation", "latest", "compare",
+            "find the best", "look up", "search online", "github", "website",
+            "api reference", "read about",
+        ]
+        message_lower = user_message.lower()
+        return any(keyword in message_lower for keyword in research_keywords)
+
+    def _build_execution_plan(
+        self,
+        envelope: TaskEnvelope,
+        analysis: TaskAnalysis,
+    ) -> ExecutionPlan:
+        """Create an explicit step-by-step plan before execution starts."""
+        steps: List[PlanStep] = []
+
+        def _make_step(
+            index: int,
+            agent_type: str,
+            goal: str,
+            message: str,
+            depends_on: Optional[List[str]] = None,
+            approval_level: str = "none",
+            success_criteria: str = "",
+            fallback_strategy: str = "",
+        ) -> PlanStep:
+            return PlanStep(
+                step_id=f"step-{index}",
+                agent_type=agent_type,  # type: ignore[arg-type]
+                goal=goal,
+                inputs={"message": message},
+                depends_on=depends_on or [],
+                approval_level=approval_level,  # type: ignore[arg-type]
+                success_criteria=success_criteria,
+                fallback_strategy=fallback_strategy,
+            )
+
+        if not analysis.blocked:
+            if self._requires_research_step(envelope.user_message, analysis.task_type):
+                steps.append(_make_step(
+                    1,
+                    "web_autonomous",
+                    "Research the requested implementation on the web before coding.",
+                    f"Research documentation and implementation guidance for: {envelope.user_message}",
+                    approval_level="none",
+                    success_criteria="Relevant references or findings are gathered.",
+                    fallback_strategy="Proceed with implementation using existing context if research is unavailable.",
+                ))
+                steps.append(_make_step(
+                    2,
+                    "coding",
+                    "Implement the requested solution using the gathered context.",
+                    envelope.user_message,
+                    depends_on=["step-1"],
+                    approval_level=analysis.approval.approval_level if analysis.approval.required else "none",
+                    success_criteria="Code, files, and execution artifacts are produced.",
+                    fallback_strategy="Return a concrete blocking error with partial output if implementation fails.",
+                ))
+            else:
+                steps.append(_make_step(
+                    1,
+                    analysis.task_type,
+                    f"Execute the user's {analysis.task_type.replace('_', ' ')} request.",
+                    envelope.user_message,
+                    approval_level=analysis.approval.approval_level if analysis.approval.required else "none",
+                    success_criteria="The specialist completes the request or returns a clear blocking error.",
+                    fallback_strategy="Escalate to the general agent with the failure context if needed.",
+                ))
+
+        if analysis.approval.required:
+            analysis.approval.affected_steps = [
+                step.step_id for step in steps if step.approval_level != "none"
+            ]
+
+        return ExecutionPlan(
+            plan_id=str(uuid.uuid4()),
+            task_type=analysis.task_type,  # type: ignore[arg-type]
+            summary=f"Analyze the request, then execute it through the {analysis.task_type} specialist flow.",
+            steps=steps,
+            requires_approval=analysis.approval.required,
+            approval_request=analysis.approval,
+        )
+
+    def _extract_artifacts(self, state: AgentState) -> Dict[str, Any]:
+        """Collect serializable artifacts from the current state."""
+        metadata = state.get('metadata', {})
+        safe_metadata = {
+            key: value
+            for key, value in metadata.items()
+            if not callable(value) and not key.startswith('_')
+        }
+        return {
+            'files': state.get('files') or {},
+            'language': state.get('language') or '',
+            'project_path': safe_metadata.get('project_path', ''),
+            'project_type': safe_metadata.get('project_type', ''),
+            'server_running': safe_metadata.get('server_running', False),
+            'server_url': safe_metadata.get('server_url', ''),
+            'web_screenshots': state.get('web_screenshots', []),
+            'web_actions': state.get('web_actions', []),
+            'web_current_url': state.get('web_current_url', ''),
+            'desktop_action': state.get('desktop_action', ''),
+            'desktop_result': state.get('desktop_result', {}),
+        }
+
+    async def _execute_plan_step(self, step: PlanStep, state: AgentState) -> AgentState:
+        """Dispatch a single plan step to the correct specialist node."""
+        step_message = step.inputs.get("message", state.get('user_message', ''))
+        state['user_message'] = step_message
+        state['task_type'] = step.agent_type
+
+        handlers = {
+            'coding': self._code_agent_node,
+            'desktop': self._desktop_agent_node,
+            'web': self._web_agent_node,
+            'web_autonomous': self._web_autonomous_agent_node,
+            'email': self._email_agent_node,
+            'calendar': self._calendar_agent_node,
+            'general': self._general_agent_node,
+        }
+        handler = handlers.get(step.agent_type, self._general_agent_node)
+        return await handler(state)
+
+    def _build_handoff_step(
+        self,
+        current_step: PlanStep,
+        target_agent: str,
+        handoff_context: str,
+        plan: ExecutionPlan,
+    ) -> PlanStep:
+        """Create a follow-up step after a specialist requests a handoff."""
+        return PlanStep(
+            step_id=f"step-{len(plan.steps) + 1}",
+            agent_type=target_agent,  # type: ignore[arg-type]
+            goal=f"Continue execution via {target_agent.replace('_', ' ')} handoff.",
+            inputs={"message": handoff_context},
+            depends_on=[current_step.step_id],
+            approval_level="none",
+            success_criteria="The downstream specialist completes the requested follow-up.",
+            fallback_strategy="Return the prior result and report that the handoff could not be completed.",
+        )
+
+    async def _execute_plan(
+        self,
+        state: AgentState,
+        plan: ExecutionPlan,
+        message_callback: Optional[Callable] = None,
+    ) -> tuple[AgentState, List[ExecutionTraceEvent], Dict[str, Any]]:
+        """Run the explicit plan, capturing step traces and orchestrator-managed handoffs."""
+        execution_trace: List[ExecutionTraceEvent] = []
+        approval_state = {"status": "not_required", "reason": ""}
+        completed_steps: set[str] = set()
+        step_index = 0
+
+        while step_index < len(plan.steps):
+            step = plan.steps[step_index]
+            if any(dep not in completed_steps for dep in step.depends_on):
+                step_index += 1
+                continue
+
+            if step.approval_level != "none":
+                step.status = "blocked"
+                approval_state = {
+                    "status": "required",
+                    "reason": plan.approval_request.reason if plan.approval_request else "Approval required.",
+                    "affected_steps": plan.approval_request.affected_steps if plan.approval_request else [step.step_id],
+                }
+                execution_trace.append(ExecutionTraceEvent(
+                    event_type="approval_required",
+                    phase="execution",
+                    step_id=step.step_id,
+                    agent_type=step.agent_type,
+                    success=False,
+                    message=approval_state["reason"],
+                    data={"approval_state": approval_state},
+                ))
+                await self._emit_progress(
+                    message_callback,
+                    "approval_required",
+                    approval_state["reason"],
+                    step_id=step.step_id,
+                    agent_type=step.agent_type,
+                    approval_state=approval_state,
+                )
+                break
+
+            step.status = "running"
+            execution_trace.append(ExecutionTraceEvent(
+                event_type="step_started",
+                phase="execution",
+                step_id=step.step_id,
+                agent_type=step.agent_type,
+                success=None,
+                message=step.goal,
+                data={"inputs": step.inputs},
+            ))
+            await self._emit_progress(
+                message_callback,
+                "step_started",
+                step.goal,
+                step_id=step.step_id,
+                agent_type=step.agent_type,
+                step=step.model_dump(),
+            )
+
+            state = await self._execute_plan_step(step, state)
+            step.status = "completed" if state.get('success') else "failed"
+
+            artifacts = self._extract_artifacts(state)
+            execution_trace.append(ExecutionTraceEvent(
+                event_type="step_completed",
+                phase="execution",
+                step_id=step.step_id,
+                agent_type=step.agent_type,
+                success=state.get('success', False),
+                message=state.get('current_output', '')[:500],
+                data={"artifacts": artifacts},
+            ))
+            await self._emit_progress(
+                message_callback,
+                "step_completed",
+                state.get('current_output', '')[:500] or f"Completed {step.agent_type}",
+                step_id=step.step_id,
+                agent_type=step.agent_type,
+                success=state.get('success', False),
+                artifacts=artifacts,
+                step=step.model_dump(),
+            )
+
+            if not state.get('success', False):
+                break
+
+            completed_steps.add(step.step_id)
+
+            # Allow specialists to request another specialist through the orchestrator.
+            state['metadata'].pop('_cross_agent_done', None)
+            state['metadata'].pop('_cross_target', None)
+            state['metadata'].pop('_cross_context', None)
+            state = await self._cross_agent_check_node(state)
+            cross_target = state.get('metadata', {}).get('_cross_target')
+            cross_context = state.get('metadata', {}).get('_cross_context')
+
+            if cross_target and cross_context:
+                handoff_step = self._build_handoff_step(step, cross_target, cross_context, plan)
+                plan.steps.append(handoff_step)
+                handoff = AgentHandoff(
+                    from_agent=step.agent_type,
+                    to_agent=cross_target,  # type: ignore[arg-type]
+                    reason="Specialist requested a follow-up action.",
+                    context=cross_context,
+                )
+                execution_trace.append(ExecutionTraceEvent(
+                    event_type="handoff",
+                    phase="execution",
+                    step_id=step.step_id,
+                    agent_type=step.agent_type,
+                    success=True,
+                    message=f"Handoff to {cross_target}",
+                    data={"handoff": handoff.model_dump(), "new_step": handoff_step.model_dump()},
+                ))
+                await self._emit_progress(
+                    message_callback,
+                    "handoff",
+                    f"Routing follow-up work to {cross_target.replace('_', ' ')}.",
+                    handoff=handoff.model_dump(),
+                    step=handoff_step.model_dump(),
+                )
+                state['metadata'].pop('_cross_target', None)
+                state['metadata'].pop('_cross_context', None)
+
+            step_index += 1
+
+        return state, execution_trace, approval_state
+
+    async def _persist_interaction(
+        self,
+        envelope: TaskEnvelope,
+        response_text: str,
+        task_type: str,
+        agent_path: List[str],
+        success: bool,
+        execution_trace: List[ExecutionTraceEvent],
+    ) -> None:
+        """Persist the user request and assistant response once per orchestrated turn."""
+        try:
+            trace_payload = [event.model_dump() for event in execution_trace]
+            self.memory_service.save_message(
+                conversation_id=envelope.conversation_id,
+                user_id=envelope.user_id,
+                role='user',
+                content=envelope.user_message,
+                metadata={'channel': envelope.channel},
+            )
+            self.memory_service.save_message(
+                conversation_id=envelope.conversation_id,
+                user_id=envelope.user_id,
+                role='assistant',
+                content=response_text,
+                metadata={
+                    'task_type': task_type,
+                    'agent_path': agent_path,
+                    'success': success,
+                    'execution_trace': trace_payload,
+                },
+            )
+            self.memory_service.save_conversation_exchange(
+                conversation_id=envelope.conversation_id,
+                user_id=envelope.user_id,
+                user_message=envelope.user_message,
+                assistant_response=response_text,
+                metadata={'task_type': task_type},
+            )
+            self.memory_service.save_task(
+                envelope.user_id,
+                {
+                    'conversation_id': envelope.conversation_id,
+                    'task_type': task_type,
+                    'description': envelope.user_message,
+                    'agent_used': 'planner_executor',
+                    'iterations': len([event for event in execution_trace if event.event_type == 'step_completed']),
+                    'success': success,
+                }
+            )
+        except Exception as exc:
+            logger.error(f"❌ Unified persistence error: {exc}")
+
+    # ===== PUBLIC INTERFACE =====
+    
+    # ===== PUBLIC INTERFACE =====
+    
+    async def process(
+        self,
+        user_message: str,
+        user_id: str,
+        conversation_id: str,
+        max_iterations: int = 3,
+        message_callback: Optional[Callable] = None
+    ) -> Dict[str, Any]:
+        """Process a request through the unified planner/executor architecture."""
+        logger.info(f"🚀 Processing: '{user_message[:50]}...'")
+
+        state = self._build_initial_state(
+            user_message=user_message,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            max_iterations=max_iterations,
+            message_callback=message_callback,
+        )
+        envelope = TaskEnvelope(
+            user_message=user_message,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            channel=self._detect_channel(user_id),
+        )
+
+        try:
+            await self._emit_progress(
+                message_callback,
+                "analysis_started",
+                "Analyzing the request and building execution context.",
+                channel=envelope.channel,
+            )
+
+            state = await self._load_context_node(state)
+            analysis = self._build_task_analysis(envelope, state)
+            state['task_type'] = analysis.task_type
+            state['confidence'] = analysis.confidence
+            state['routing_reason'] = analysis.reasoning
+
+            plan = self._build_execution_plan(envelope, analysis)
+            await self._emit_progress(
+                message_callback,
+                "plan_ready",
+                plan.summary,
+                plan=plan.model_dump(),
+                task_type=analysis.task_type,
+                confidence=analysis.confidence,
+            )
+
+            execution_trace: List[ExecutionTraceEvent] = [
+                ExecutionTraceEvent(
+                    event_type="analysis_completed",
+                    phase="analysis",
+                    message=analysis.reasoning or f"Detected {analysis.task_type} task.",
+                    agent_type=analysis.task_type,
+                    success=not analysis.blocked,
+                    data={"analysis": analysis.model_dump()},
+                )
+            ]
+
+            approval_state = {
+                "status": "not_required",
+                "reason": "",
+                "affected_steps": [],
             }
+
+            if analysis.blocked:
+                state['success'] = False
+                state['final_output'] = analysis.blocked_reason
+            else:
+                state, execution_events, approval_state = await self._execute_plan(
+                    state,
+                    plan,
+                    message_callback=message_callback,
+                )
+                execution_trace.extend(execution_events)
+
+                if approval_state["status"] == "required":
+                    state['success'] = False
+                    state['final_output'] = (
+                        "Approval is required before I continue.\n\n"
+                        f"Reason: {approval_state['reason']}"
+                    )
+                else:
+                    state['final_output'] = state.get('final_output') or state.get('current_output', '')
+
+            artifacts = self._extract_artifacts(state)
+            safe_metadata = {
+                key: value
+                for key, value in state.get('metadata', {}).items()
+                if not callable(value) and not key.startswith('_')
+            }
+
             response = {
-                'success': result.get('success', False),
-                'output': result.get('final_output', ''),
-                'task_type': result.get('task_type'),
-                'confidence': result.get('confidence'),
-                'agent_path': result.get('agent_path', []),
-                'code': result.get('code'),
-                'files': result.get('files'),
-                'language': result.get('language'),
-                'file_path': extra_metadata.get('project_path', ''),
+                'success': state.get('success', False),
+                'output': state.get('final_output', ''),
+                'task_type': analysis.task_type,
+                'confidence': analysis.confidence,
+                'agent_path': state.get('agent_path', []),
+                'code': state.get('code'),
+                'files': state.get('files'),
+                'language': state.get('language'),
+                'file_path': artifacts.get('project_path', ''),
                 'project_structure': None,
                 'main_file': None,
-                'project_type': extra_metadata.get('project_type', ''),
-                'server_running': extra_metadata.get('server_running', False),
-                'server_url': extra_metadata.get('server_url', ''),
+                'project_type': artifacts.get('project_type', ''),
+                'server_running': artifacts.get('server_running', False),
+                'server_url': artifacts.get('server_url', ''),
                 'server_port': None,
+                'plan': plan.model_dump(),
+                'execution_trace': [event.model_dump() for event in execution_trace],
+                'approval_state': approval_state,
+                'artifacts': artifacts,
                 'metadata': {
-                    'routing_reason': result.get('routing_reason'),
-                    'iterations': result.get('iteration', 1),
-                    'errors': result.get('errors', []),
-                    'web_screenshots': result.get('web_screenshots', []),
-                    'web_actions_count': len(result.get('web_actions', [])),
-                    'web_current_url': result.get('web_current_url', ''),
-                    **extra_metadata
-                }
+                    'channel': envelope.channel,
+                    'routing_reason': analysis.reasoning,
+                    'risk_level': analysis.risk_level,
+                    'iterations': len([event for event in execution_trace if event.event_type == 'step_completed']),
+                    'errors': state.get('errors', []),
+                    'web_screenshots': state.get('web_screenshots', []),
+                    'web_actions_count': len(state.get('web_actions', [])),
+                    'web_current_url': state.get('web_current_url', ''),
+                    **safe_metadata,
+                },
             }
-            
-            step_count = len(result.get('agent_path', []))
-            logger.info(f"✅ Completed with {step_count} steps")
-            
+
+            await self._persist_interaction(
+                envelope=envelope,
+                response_text=response['output'],
+                task_type=analysis.task_type,
+                agent_path=response['agent_path'],
+                success=response['success'],
+                execution_trace=execution_trace,
+            )
+            await self._emit_progress(
+                message_callback,
+                "final",
+                response['output'][:500] if response['output'] else "Execution complete.",
+                result=response,
+            )
+
+            logger.info(f"✅ Completed with {len(response['agent_path'])} agent hops")
             return response
-        
+
         except Exception as e:
             logger.error(f"❌ Graph execution error: {e}")
             return {
@@ -1498,7 +2032,11 @@ EXPLANATION: Brief description"""
                 'task_type': 'general',
                 'confidence': 0.0,
                 'agent_path': ['error'],
-                'metadata': {'error': str(e)}
+                'plan': None,
+                'execution_trace': [],
+                'approval_state': {'status': 'not_required', 'reason': '', 'affected_steps': []},
+                'artifacts': {},
+                'metadata': {'error': str(e)},
             }
 
 
