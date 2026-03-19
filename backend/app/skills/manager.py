@@ -12,21 +12,27 @@ from app.skills.schema import SkillManifest, PermissionScope
 
 class SkillManager:
     """Manages skill loading, validation, and registry"""
-    
-    # def __init__(self, skills_directory: str = "skills"):
-    def __init__(self, skills_directory: str = "/app/skills"):
+
+    def __init__(self, skills_directory: str = "app/skills"):
         """
         Initialize skill manager
-        
+
         Args:
             skills_directory: Directory containing skill folders
         """
-        self.skills_directory = Path(skills_directory)
+        # Use relative path from backend directory
+        if not os.path.isabs(skills_directory):
+            # Get the backend directory (parent of app)
+            backend_dir = Path(__file__).parent.parent.parent
+            self.skills_directory = backend_dir / skills_directory
+        else:
+            self.skills_directory = Path(skills_directory)
+
         self.skills: Dict[str, SkillManifest] = {}
         self.skills_path: Dict[str, Path] = {}
-        
+
         # Create skills directory if it doesn't exist
-        self.skills_directory.mkdir(exist_ok=True)
+        self.skills_directory.mkdir(parents=True, exist_ok=True)
         
         logger.info(f"Initialized SkillManager with directory: {self.skills_directory}")
     

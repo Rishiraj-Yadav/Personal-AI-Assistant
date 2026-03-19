@@ -1,9 +1,10 @@
 """
 SonarBot - Main FastAPI Application
+Production-ready with observability, security, and async database
 """
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from contextlib import asynccontextmanager
 import os
 
@@ -23,9 +24,27 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info(f"Starting {settings.APP_NAME} v{settings.APP_VERSION}")
     logger.info(f"Using Groq model: {settings.GROQ_MODEL}")
-    
-    # Initialize database
-    init_db()  # ✅ Create tables
+
+    # ============ PHASE 3: Initialize Observability ============
+    from app.observability import setup_observability
+    setup_observability(
+        service_name="sonarbot",
+        log_level=os.getenv("LOG_LEVEL", "INFO"),
+        json_logs=os.getenv("LOG_JSON", "false").lower() == "true",
+        jaeger_enabled=os.getenv("JAEGER_ENABLED", "false").lower() == "true"
+    )
+    logger.info("✅ Observability initialized (tracing, metrics, logging)")
+
+    # ============ PHASE 4: Initialize Async Database ============
+    try:
+        from app.database.async_base import init_async_db
+        await init_async_db()
+        logger.info("✅ Async database initialized")
+    except Exception as e:
+        logger.warning(f"⚠️ Async database init failed (falling back to sync): {e}")
+
+    # Initialize sync database (existing)
+    init_db()
     logger.info("✅ Database initialized")
     
     # Start scheduler
@@ -53,6 +72,14 @@ async def lifespan(app: FastAPI):
     yield
     
     # Shutdown
+    # ============ PHASE 4: Close Async Database ============
+    try:
+        from app.database.async_base import close_async_db
+        await close_async_db()
+        logger.info("✅ Async database closed")
+    except Exception as e:
+        logger.warning(f"⚠️ Async database close failed: {e}")
+
     from app.services.scheduler_service import scheduler_service as sched
     sched.shutdown()
     from app.services.discord_bot_service import discord_bot_service as dbot
@@ -93,6 +120,36 @@ async def root():
         "version": settings.APP_VERSION,
         "status": "running",
         "docs": "/docs"
+    }
+
+
+# ============ PHASE 3: Metrics Endpoint ============
+@app.get("/metrics")
+async def metrics():
+    """Prometheus metrics endpoint"""
+    from app.observability.metrics import metrics as metrics_collector
+    return Response(
+        content=metrics_collector.get_metrics(),
+        media_type=metrics_collector.get_content_type()
+    )
+
+
+@app.get("/health")
+async def health():
+    """Health check endpoint with system status"""
+    from app.core.executor_factory import ExecutorFactory
+
+    try:
+        executor = ExecutorFactory.get_executor()
+        executor_health = await executor.health_check()
+    except Exception as e:
+        executor_health = {"status": "error", "error": str(e)}
+
+    return {
+        "status": "healthy",
+        "service": settings.APP_NAME,
+        "version": settings.APP_VERSION,
+        "executor": executor_health
     }
 
 

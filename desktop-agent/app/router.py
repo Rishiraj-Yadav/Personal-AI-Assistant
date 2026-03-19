@@ -6,6 +6,7 @@ This mirrors OpenClaw's modular orchestration approach.
 """
 from typing import Optional
 import json
+import re
 import google.generativeai as genai
 from loguru import logger
 from config import settings
@@ -56,14 +57,13 @@ Determine the best agent to handle this command.
 Return ONLY JSON format: {{"agent_name": "<name>"}}
 """
         try:
-            response = self.model.generate_content(prompt)
+            response = await self.model.generate_content_async(prompt)
             text = response.text.strip()
             
-            # Clean up JSON formatting if present
-            if text.startswith("```json"):
-                text = text[7:-3].strip()
-            elif text.startswith("```"):
-                text = text[3:-3].strip()
+            # Clean up JSON formatting using regex
+            match = re.search(r'\{.*\}', text, re.DOTALL)
+            if match:
+                text = match.group(0)
 
             parsed = json.loads(text)
             selected_agent = parsed.get("agent_name", "system")

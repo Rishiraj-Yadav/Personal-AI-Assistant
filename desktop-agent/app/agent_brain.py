@@ -127,7 +127,7 @@ class AgentBrain:
 
             # Update context engine
             self.context.add_message("user", command)
-            self.context.add_message("assistant", final_text)
+            self.context.add_message("model", final_text)
 
             return {"response": final_text, "actions_taken": actions_taken, "success": True}
 

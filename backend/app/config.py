@@ -113,10 +113,11 @@ Be proactive in using desktop skills when appropriate. Always use desktop_app_la
     
     # Security
     SECRET_KEY: str = "your-secret-key-change-this-in-production"
-    
+
     class Config:
         env_file = ".env"
         case_sensitive = True
+        extra = "ignore"  # Ignore extra fields from .env not defined in Settings
 
 
 # Global settings instance

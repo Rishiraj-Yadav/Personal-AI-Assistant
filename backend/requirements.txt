@@ -38,6 +38,7 @@ langgraph>=0.2.0,<0.3.0
 
 # ── Database ──────────────────────────────────────────────────────────
 sqlalchemy>=2.0.25,<2.1.0
+aiosqlite>=0.19.0,<0.21.0        # Async SQLite support (Phase 4)
 
 # ── Google APIs (Gmail + Calendar) ────────────────────────────────────
 google-auth>=2.27.0,<3.0.0
@@ -57,6 +58,15 @@ loguru>=0.7.2,<0.8.0
 aiofiles>=23.2.1,<24.0.0
 python-dateutil>=2.8.2,<2.10.0
 orjson>=3.9.14,<4.0.0
+
+# ── Observability (Phase 3) ─────────────────────────────────────────────
+prometheus-client>=0.19.0,<0.21.0    # Prometheus metrics
+
+# ── Optional: OpenTelemetry for distributed tracing ────────────────────
+# Uncomment if you need Jaeger/distributed tracing:
+# opentelemetry-sdk>=1.22.0,<2.0.0
+# opentelemetry-exporter-jaeger>=1.21.0,<2.0.0
+# opentelemetry-instrumentation-fastapi>=0.43b0
 
 
 

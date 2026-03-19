@@ -15,6 +15,7 @@ import subprocess
 import signal
 import time
 import argparse
+import importlib
 from pathlib import Path
 
 # ───── Project paths ─────
@@ -62,7 +63,7 @@ def check_dependencies():
     missing = []
     for pkg in required:
         try:
-            __import__(pkg)
+            importlib.import_module(pkg)
         except ImportError:
             missing.append(pkg)
 
@@ -135,7 +136,7 @@ def start_desktop_agent():
     print("-" * 60 + "\n")
 
     agent_proc = subprocess.Popen(
-        [sys.executable, str(DESKTOP_AGENT_DIR / "desktop_agent.py")],
+        [sys.executable, str(DESKTOP_AGENT_DIR / "app" / "main.py")],
         cwd=str(DESKTOP_AGENT_DIR),
     )
     return agent_proc

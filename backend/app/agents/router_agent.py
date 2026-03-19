@@ -18,7 +18,7 @@ class RouterAgent:
     # Pre-compiled patterns for fast-path routing (catches typos too)
     _WEB_FAST_PATTERNS = re.compile(
         r'brows|open\s+.{0,6}brows|'             # browser / broswer / browsr etc.
-        r'leetcode|amazon|flipkart|youtube|github|'
+        r'leetcode|amazon|flipkart|github|'
         r'stackoverflow|wikipedia|reddit|twitter|'
         r'linkedin|facebook|instagram|netflix|'
         r'\.com\b|\.org\b|\.io\b|\.net\b|\.dev\b|'
@@ -81,7 +81,7 @@ Analyze this request and classify it into ONE category:
    NOTE: DESKTOP is ONLY for controlling the user's physical computer. Do NOT use DESKTOP when the user wants to visit a website or browse the web.
    
 3. WEB_AUTONOMOUS - Autonomously browse the web, research topics, interact with web pages, fill forms, compare products, book things, perform multi-step web tasks
-   Triggers: "browse", "browser", "open browser", "search the web", "go to", "visit", "look up", "research", "compare", "book", "check price", "find flights", "order", "search for", "find me", "show me", "look for", "web search", "google", "browse to", "open website", "fill form", "sign up on", "buy", "purchase", "leetcode", "amazon", "wikipedia", "youtube", "github"
+   Triggers: "browse", "browser", "open browser", "search the web", "go to", "visit", "look up", "research", "compare", "book", "check price", "find flights", "order", "search for", "find me", "show me", "look for", "web search", "google", "browse to", "open website", "fill form", "sign up on", "buy", "purchase", "leetcode", "amazon", "wikipedia", "github"
    Examples: "open browser on leetcode", "search the web for best laptops 2026", "go to amazon and find AirPods price", "research AI news", "compare flights to NYC", "visit wikipedia and summarize the page about Mars", "open browser and go to github"
 
 4. WEB - Simple scrape/weather/data fetch (no browsing needed)
@@ -104,7 +104,8 @@ IMPORTANT RULES:
 - If user mentions code/programming/app/API → CODING
 - If user mentions file paths like "R:/..." → CODING
 - If user says "create", "make", "build" + tech term → CODING
-- "open browser", "browser", or any mention of a website name (leetcode, amazon, google, youtube, github, etc.) → WEB_AUTONOMOUS (NOT desktop!)
+- "open browser", "browser", or any mention of a website name (leetcode, amazon, google, github, etc.) → WEB_AUTONOMOUS (NOT desktop!)
+- If the user asks to open or search YouTube → DESKTOP (so it opens locally on host)
 - If user wants to browse, search, research, visit a website, or do anything involving web pages → WEB_AUTONOMOUS
 - If user just wants a simple scrape or weather check → WEB
 - If user mentions email/mail/inbox → EMAIL
@@ -183,7 +184,8 @@ Classify now:"""
             "click", "screenshot", "mouse",
             "keyboard", "window", "minimize", "maximize",
             "launch app", "launch vs", "launch notepad",
-            "take screenshot", "move mouse", "press key"
+            "take screenshot", "move mouse", "press key",
+            "youtube", "open youtube"
         ]
         
         # Web autonomous keywords (browsing, research, interaction)
@@ -196,9 +198,8 @@ Classify now:"""
             "buy online", "purchase online"
         ]
         
-        # Known website names → always web_autonomous
         website_names = [
-            "leetcode", "amazon", "flipkart", "youtube", "github",
+            "leetcode", "amazon", "flipkart", "github",
             "stackoverflow", "wikipedia", "reddit", "twitter",
             "linkedin", "facebook", "instagram", "netflix",
             ".com", ".org", ".io", ".net", ".dev", "http"

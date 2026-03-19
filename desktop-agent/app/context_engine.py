@@ -23,14 +23,20 @@ class ContextEngine:
         if len(self._history) > self._max_history * 2:
             logger.debug(f"Pruning context history from {len(self._history)} to {self._max_history}")
             self._history = self._history[-self._max_history:]
+            
+            # Gemini strictly requires the history to start with a "user" message
+            if self._history and self._history[0]["role"] != "user":
+                self._history.pop(0)
 
     def get_gemini_history(self) -> list:
         """Convert the internal history to Gemini's expected protobuf format."""
         gemini_history = []
         for msg in self._history:
+            # Map "assistant" to "model" for Gemini compatibility
+            role = "model" if msg["role"] == "assistant" else msg["role"]
             gemini_history.append(
                 genai.protos.Content(
-                    role=msg["role"],
+                    role=role,
                     parts=[genai.protos.Part(text=msg["content"])],
                 )
             )
