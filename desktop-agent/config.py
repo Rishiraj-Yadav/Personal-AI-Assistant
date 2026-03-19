@@ -1,55 +1,75 @@
 """
 Desktop Agent Configuration
-Isolated settings — reads from .env.desktop only
+Isolated settings - prefers .env.desktop and falls back to .env.
 """
-from pydantic_settings import BaseSettings
+from pathlib import Path
 from typing import List
-import secrets
 import os
+import secrets
+
+from pydantic_settings import BaseSettings
+
+
+_BASE_DIR = Path(__file__).resolve().parent
+
+
+def _load_env_file(path: Path, *, override: bool) -> None:
+    """Load simple KEY=VALUE pairs from an env file without extra dependencies."""
+    if not path.exists():
+        return
+
+    for raw_line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if not key:
+            continue
+        if override or key not in os.environ:
+            os.environ[key] = value
+
+
+_load_env_file(_BASE_DIR / ".env", override=False)
+_load_env_file(_BASE_DIR / ".env.desktop", override=True)
 
 
 class DesktopAgentSettings(BaseSettings):
-    """Desktop Agent configuration"""
+    """Desktop Agent configuration."""
 
-    # LLM Brain
     GOOGLE_API_KEY: str = ""
 
-    # Server settings
     HOST: str = "127.0.0.1"
     PORT: int = 7777
     API_KEY: str = ""
 
-    # Safety settings
     SAFE_MODE: bool = False
     REQUIRE_CONFIRMATION: bool = True
     LOG_ALL_ACTIONS: bool = True
 
-    # Action timeouts (seconds)
     ACTION_TIMEOUT: int = 30
     SCREENSHOT_TIMEOUT: int = 5
     APP_LAUNCH_TIMEOUT: int = 10
 
-    # Allowed safe paths for file operations
     SAFE_PATHS: List[str] = [
         os.path.expanduser("~/Desktop"),
         os.path.expanduser("~/Documents"),
         os.path.expanduser("~/Downloads"),
     ]
 
-    # Blocked commands (for shell executor)
     BLOCKED_COMMANDS: List[str] = [
         "format", "diskpart", "del /s /q C:",
         "Remove-Item -Recurse -Force C:",
         "rd /s /q C:", "shutdown", "restart",
     ]
 
-    # Blocked applications
     BLOCKED_APPS: List[str] = [
         "regedit", "registry",
         "format", "diskpart",
     ]
 
-    # Dangerous keywords requiring confirmation
     DANGER_KEYWORDS: List[str] = [
         "delete", "remove", "format", "wipe",
         "install", "uninstall",
@@ -57,38 +77,29 @@ class DesktopAgentSettings(BaseSettings):
         "permission", "admin", "root",
     ]
 
-    # Screen boundaries
     MAX_SCREEN_WIDTH: int = 4096
     MAX_SCREEN_HEIGHT: int = 2160
 
-    # Mouse settings
     MOUSE_MOVE_DURATION: float = 0.3
     CLICK_DELAY: float = 0.1
 
-    # Keyboard settings
     TYPING_INTERVAL: float = 0.05
 
-    # OCR settings
     OCR_ENABLED: bool = True
     OCR_LANGUAGE: str = "eng"
 
-    # Logging
     LOG_FILE: str = "logs/desktop_agent.log"
     LOG_LEVEL: str = "INFO"
 
-    # Scheduler
     SCHEDULER_DATA_FILE: str = "data/scheduled_tasks.json"
 
     class Config:
-        env_file = ".env.desktop"
         case_sensitive = True
         extra = "ignore"
 
 
-# Global settings instance
 _settings = DesktopAgentSettings()
 
-# If no API_KEY was loaded, auto-generate one
 if not _settings.API_KEY:
     _desktop_key = os.environ.get("DESKTOP_AGENT_API_KEY", "").strip()
     if _desktop_key:
@@ -100,7 +111,7 @@ settings = _settings
 
 
 def save_api_key():
-    """Save generated API key to file"""
+    """Save generated API key to file."""
     os.makedirs("config", exist_ok=True)
     with open("config/api_key.txt", "w") as f:
         f.write(settings.API_KEY)

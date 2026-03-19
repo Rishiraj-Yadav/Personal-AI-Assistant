@@ -36,6 +36,7 @@ function ChatInterface() {
   })
 
   const [webPermissionPending, setWebPermissionPending] = useState(null)
+  const [taskApprovalPending, setTaskApprovalPending] = useState(null)
 
   const messagesEndRef = useRef(null)
   const inputRef = useRef(null)
@@ -159,10 +160,22 @@ function ChatInterface() {
           web_screenshots: response.data.web_screenshots || response.data.metadata?.web_screenshots || [],
           web_current_url: response.data.web_current_url || response.data.metadata?.web_current_url || '',
           web_autonomous: response.data.web_autonomous || response.data.metadata?.web_autonomous || false,
-          web_actions_count: response.data.metadata?.web_actions_count || 0
+          web_actions_count: response.data.metadata?.web_actions_count || 0,
+          plan: response.data.plan,
+          execution_trace: response.data.execution_trace || [],
+          approval_state: response.data.approval_state || null,
+          artifacts: response.data.artifacts || null
         }
       }
       setMessages(prev => [...prev, assistantMessage])
+      if (response.data.approval_state?.status === 'required') {
+        setTaskApprovalPending({
+          approvalId: response.data.approval_state.approval_id,
+          reason: response.data.approval_state.reason || 'Approval required.',
+          affectedSteps: response.data.approval_state.affected_steps || [],
+          taskType: response.data.task_type
+        })
+      }
       if (!conversationId && response.data.conversation_id) {
         setConversationId(response.data.conversation_id)
       }
@@ -203,6 +216,9 @@ function ChatInterface() {
           setProgress('⚠️ Permission needed...')
           handleWebAgentPermission(data)
         }
+        else if (data.type === 'approval_required') {
+          setProgress('⚠️ Approval needed...')
+        }
         else if (data.type === 'complete') { finalResult = data.result; ws.close() }
         else if (data.type === 'error') { reject(new Error(data.message)); ws.close() }
       }
@@ -231,6 +247,10 @@ function ChatInterface() {
               server_url: finalResult.server_url,
               language: finalResult.language,
               metadata: finalResult.metadata,
+              plan: finalResult.plan,
+              execution_trace: finalResult.execution_trace,
+              approval_state: finalResult.approval_state,
+              artifacts: finalResult.artifacts,
               web_screenshots: finalResult.web_screenshots,
               web_current_url: finalResult.web_current_url,
               web_autonomous: finalResult.web_autonomous,
@@ -266,6 +286,46 @@ function ChatInterface() {
       console.error('Permission response failed:', err)
     }
     setWebPermissionPending(null)
+  }
+
+  const respondToTaskApproval = async (approved) => {
+    if (!taskApprovalPending) return
+    setIsLoading(true)
+    setError(null)
+    try {
+      const response = await axios.post(`${API_BASE_URL}/multi-agent/approval/respond`, {
+        approval_id: taskApprovalPending.approvalId,
+        user_id: userId,
+        approved
+      })
+      const assistantMessage = {
+        role: 'assistant',
+        content: response.data.response,
+        timestamp: new Date().toISOString(),
+        metadata: {
+          task_type: response.data.task_type,
+          agent_path: response.data.agent_path,
+          approval_state: response.data.approval_state,
+          plan: response.data.plan,
+          execution_trace: response.data.execution_trace || [],
+          artifacts: response.data.artifacts || null,
+          language: response.data.language,
+          files: response.data.files,
+          file_path: response.data.file_path,
+          project_structure: response.data.project_structure,
+          main_file: response.data.main_file,
+          server_running: response.data.server_running,
+          server_url: response.data.server_url,
+          metadata: response.data.metadata,
+        }
+      }
+      setMessages(prev => [...prev, assistantMessage])
+    } catch (err) {
+      setError(err.response?.data?.detail || err.message || 'Failed to process approval.')
+    } finally {
+      setTaskApprovalPending(null)
+      setIsLoading(false)
+    }
   }
 
   const handleInputChange = (e) => {
@@ -425,6 +485,22 @@ function ChatInterface() {
             <div className="permission-actions">
               <button className="btn-permission approve" onClick={() => respondToWebPermission(true)}>✅ Approve</button>
               <button className="btn-permission deny" onClick={() => respondToWebPermission(false)}>❌ Deny</button>
+            </div>
+          </div>
+        )}
+
+        {taskApprovalPending && (
+          <div className="permission-banner">
+            <div className="permission-icon">⚠️</div>
+            <div className="permission-content">
+              <div className="permission-title">Approval Required</div>
+              <div className="permission-desc">
+                {taskApprovalPending.reason}
+              </div>
+            </div>
+            <div className="permission-actions">
+              <button className="btn-permission approve" onClick={() => respondToTaskApproval(true)}>Approve</button>
+              <button className="btn-permission deny" onClick={() => respondToTaskApproval(false)}>Deny</button>
             </div>
           </div>
         )}

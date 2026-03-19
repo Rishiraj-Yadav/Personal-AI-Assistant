@@ -22,7 +22,10 @@ async def lifespan(app: FastAPI):
     """
     # Startup
     logger.info(f"Starting {settings.APP_NAME} v{settings.APP_VERSION}")
-    logger.info(f"Using Groq model: {settings.GROQ_MODEL}")
+    if settings.GOOGLE_API_KEY:
+        logger.info(f"Using primary model: {settings.GEMINI_MODEL}")
+    if settings.GROQ_API_KEY:
+        logger.info(f"Using fallback/tool model: {settings.GROQ_MODEL}")
     
     # Initialize database
     init_db()  # ✅ Create tables

@@ -219,8 +219,17 @@ async def execute_skill_direct(
 @app.get("/capabilities")
 async def list_capabilities(api_key: str = Depends(verify_api_key)):
     """List all agents, their tools, and descriptions"""
+    agents = registry.list_agents()
+    tools = sorted(
+        {
+            tool_name
+            for agent in agents
+            for tool_name in agent.get("tools", [])
+        }
+    )
     return {
-        "agents": registry.list_agents(),
+        "agents": agents,
+        "tools": tools,
         "total_tools": registry.tool_count,
     }
 
@@ -252,23 +261,22 @@ async def resume(api_key: str = Depends(verify_api_key)):
 def startup_banner():
     """Print startup banner"""
     print("\n" + "=" * 60)
-    print("🤖  DESKTOP AGENT v2 — AI Desktop Assistant")
+    print("DESKTOP AGENT v2 - AI Desktop Assistant")
     print("=" * 60)
     print(f"Host: {settings.HOST}:{settings.PORT}")
-    print(f"Brain: {'Gemini Flash ✓' if brain.model else '❌ NOT CONFIGURED'}")
+    print(f"Brain: {'Gemini Flash READY' if brain.model else 'NOT CONFIGURED'}")
     print(f"Agents: {registry.agent_count} loaded")
     print(f"Tools: {registry.tool_count} available")
-    print(f"Safe Mode: {'ON ✓' if settings.SAFE_MODE else 'OFF ⚠️'}")
+    print(f"Safe Mode: {'ON' if settings.SAFE_MODE else 'OFF'}")
     print("=" * 60)
     print(f"API Key: {settings.API_KEY[:20]}...")
     print("=" * 60)
 
     if not brain.model:
-        print("\n⚠️  Set GOOGLE_API_KEY in .env.desktop to enable the brain!")
+        print("\nSet GOOGLE_API_KEY in .env.desktop or .env to enable the brain.")
 
-    # List all agents
     for agent_info in registry.list_agents():
-        print(f"  • {agent_info['name']}: {', '.join(agent_info['tools'])}")
+        print(f"  - {agent_info['name']}: {', '.join(agent_info['tools'])}")
 
     print("=" * 60 + "\n")
 
@@ -304,3 +312,4 @@ if __name__ == "__main__":
         port=settings.PORT,
         log_level=settings.LOG_LEVEL.lower(),
     )
+

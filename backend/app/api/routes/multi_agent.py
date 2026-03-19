@@ -262,6 +262,12 @@ class WebAgentPermissionRequest(BaseModel):
     approved: bool
 
 
+class ApprovalDecisionRequest(BaseModel):
+    approval_id: str
+    user_id: str
+    approved: bool
+
+
 @router.post("/web-agent/permission")
 async def web_agent_permission(request: WebAgentPermissionRequest):
     """User responds to a web agent permission request (approve/deny)."""
@@ -274,6 +280,91 @@ async def web_agent_permission(request: WebAgentPermissionRequest):
         return {"success": True, "approved": request.approved}
     except Exception as e:
         logger.error(f"❌ Permission response error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/approval/respond", response_model=MultiAgentResponse)
+async def respond_to_guarded_approval(request: ApprovalDecisionRequest):
+    """Approve or deny a guarded planner/executor action and resume if approved."""
+    try:
+        from app.services.approval_service import approval_service
+
+        approval = approval_service.get_request(request.approval_id)
+        if not approval:
+            raise HTTPException(status_code=404, detail="Approval request not found")
+        if approval.user_id != request.user_id:
+            raise HTTPException(status_code=403, detail="Approval request does not belong to this user")
+        if approval.status != "pending":
+            raise HTTPException(status_code=409, detail=f"Approval request already {approval.status}")
+
+        if not request.approved:
+            approval_service.resolve(
+                request.approval_id,
+                approved=False,
+                result={"output": "Action cancelled by user.", "task_type": approval.task_type},
+            )
+            return MultiAgentResponse(
+                success=False,
+                task_type=approval.task_type,
+                confidence=1.0,
+                response="Action cancelled by user.",
+                metadata={"approval_id": request.approval_id, "approval_status": "denied"},
+                plan=None,
+                execution_trace=[],
+                approval_state={
+                    "status": "denied",
+                    "reason": approval.reason,
+                    "approval_id": request.approval_id,
+                    "affected_steps": approval.affected_steps,
+                },
+                artifacts={},
+                agent_path=["approval_denied"],
+            )
+
+        result = await langgraph_orchestrator.process(
+            user_message=approval.user_message,
+            user_id=approval.user_id,
+            conversation_id=approval.conversation_id,
+            max_iterations=3,
+            approval_override=True,
+        )
+        approval_service.resolve(request.approval_id, approved=True, result=result)
+
+        return MultiAgentResponse(
+            success=result.get("success", False),
+            task_type=result.get("task_type", approval.task_type),
+            confidence=result.get("confidence", 0.0),
+            response=result.get("output", ""),
+            code=result.get("code"),
+            file_path=result.get("file_path"),
+            files=result.get("files"),
+            project_structure=result.get("project_structure"),
+            main_file=result.get("main_file"),
+            project_type=result.get("project_type"),
+            server_running=result.get("server_running", False),
+            server_url=result.get("server_url"),
+            server_port=result.get("server_port"),
+            language=result.get("language"),
+            metadata={
+                **result.get("metadata", {}),
+                "approval_id": request.approval_id,
+                "approval_status": "approved",
+            },
+            plan=result.get("plan"),
+            execution_trace=result.get("execution_trace", []),
+            approval_state={
+                **(result.get("approval_state") or {}),
+                "status": "approved",
+                "approval_id": request.approval_id,
+            },
+            artifacts=result.get("artifacts"),
+            error=result.get("error"),
+            agent_path=result.get("agent_path", []),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Approval response error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

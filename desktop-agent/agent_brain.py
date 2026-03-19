@@ -44,7 +44,7 @@ RULES:
     def __init__(self):
         """Initialize the Orchestrator with Gemini Flash"""
         if not settings.GOOGLE_API_KEY:
-            logger.error("GOOGLE_API_KEY not set! Agent brain will not work.")
+            logger.error("GOOGLE_API_KEY not set in .env.desktop or .env. Agent brain will not work.")
             self.model = None
             return
 
@@ -92,7 +92,7 @@ RULES:
         """
         if not self.model:
             return {
-                "response": "Agent brain not initialized. Please set GOOGLE_API_KEY in .env.desktop",
+                "response": "Agent brain not initialized. Please set GOOGLE_API_KEY in .env.desktop or .env",
                 "actions_taken": [],
                 "success": False,
             }

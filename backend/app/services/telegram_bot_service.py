@@ -200,6 +200,7 @@ class TelegramBotService:
         text: str,
         reply_to_message_id: Optional[int] = None,
         thread_id: Optional[int] = None,
+        reply_markup: Optional[dict] = None,
     ) -> None:
         for chunk in self._split_message(text):
             payload = {"chat_id": chat_id, "text": chunk}
@@ -207,7 +208,18 @@ class TelegramBotService:
                 payload["message_thread_id"] = thread_id
             elif reply_to_message_id is not None:
                 payload["reply_to_message_id"] = reply_to_message_id
+            if reply_markup is not None:
+                payload["reply_markup"] = reply_markup
             await self._api_post("sendMessage", payload=payload)
+
+    async def _answer_callback_query(self, callback_query_id: str, text: str) -> None:
+        try:
+            await self._api_post(
+                "answerCallbackQuery",
+                payload={"callback_query_id": callback_query_id, "text": text},
+            )
+        except Exception as e:
+            logger.debug(f"answerCallbackQuery failed: {e}")
 
     async def _send_screenshot(
         self,
@@ -270,6 +282,7 @@ class TelegramBotService:
 
         try:
             from app.services.slash_command_service import slash_command_service
+            result = None
 
             if slash_command_service.is_slash_command(content):
                 result = await slash_command_service.execute(
@@ -292,6 +305,9 @@ class TelegramBotService:
             if isinstance(result, dict):
                 meta = result.get("metadata", {}) or {}
                 screenshot_b64 = meta.get("screenshot_base64")
+                approval_state = result.get("approval_state") or {}
+            else:
+                approval_state = {}
 
             await self._send_text_response(
                 chat_id=chat_id,
@@ -299,6 +315,22 @@ class TelegramBotService:
                 reply_to_message_id=message_id,
                 thread_id=thread_id,
             )
+
+            if approval_state.get("status") == "required" and approval_state.get("approval_id"):
+                approval_id = approval_state["approval_id"]
+                keyboard = {
+                    "inline_keyboard": [[
+                        {"text": "Approve", "callback_data": f"approval:approve:{approval_id}"},
+                        {"text": "Deny", "callback_data": f"approval:deny:{approval_id}"},
+                    ]]
+                }
+                await self._send_text_response(
+                    chat_id=chat_id,
+                    text="Approve this guarded action to continue.",
+                    reply_to_message_id=message_id,
+                    thread_id=thread_id,
+                    reply_markup=keyboard,
+                )
 
             if screenshot_b64:
                 await self._send_screenshot(
@@ -314,6 +346,91 @@ class TelegramBotService:
                 chat_id=chat_id,
                 text=error_msg,
                 reply_to_message_id=message_id,
+                thread_id=thread_id,
+            )
+
+    async def _process_callback_query(self, callback_query: dict) -> None:
+        """Handle inline approval buttons for guarded actions."""
+        data = callback_query.get("data") or ""
+        callback_query_id = callback_query.get("id")
+        message = callback_query.get("message") or {}
+        callback_from = callback_query.get("from") or {}
+        if not data.startswith("approval:") or not callback_query_id or not message:
+            return
+
+        try:
+            _, action, approval_id = data.split(":", 2)
+        except ValueError:
+            await self._answer_callback_query(callback_query_id, "Invalid approval action.")
+            return
+
+        from app.services.approval_service import approval_service
+
+        approval = approval_service.get_request(approval_id)
+        if not approval:
+            await self._answer_callback_query(callback_query_id, "This approval request has expired.")
+            return
+        if approval.status != "pending":
+            await self._answer_callback_query(
+                callback_query_id,
+                f"This approval request is already {approval.status}.",
+            )
+            return
+
+        callback_user_id = f"telegram_{callback_from.get('id')}"
+        if approval.user_id != callback_user_id:
+            await self._answer_callback_query(
+                callback_query_id,
+                "Only the original requester can approve this action.",
+            )
+            return
+
+        chat = message.get("chat", {}) or {}
+        chat_id = int(chat["id"])
+        thread_id = message.get("message_thread_id")
+        reply_to_message_id = int(message.get("message_id"))
+
+        if action == "deny":
+            approval_service.resolve(
+                approval_id,
+                approved=False,
+                result={"output": "Action cancelled by user."},
+            )
+            await self._answer_callback_query(callback_query_id, "Action denied.")
+            await self._send_text_response(
+                chat_id=chat_id,
+                text="Action cancelled by user.",
+                reply_to_message_id=reply_to_message_id,
+                thread_id=thread_id,
+            )
+            return
+
+        await self._answer_callback_query(callback_query_id, "Approval received. Continuing...")
+        await self._send_typing(chat_id=chat_id, thread_id=thread_id)
+
+        try:
+            orchestrator = self._get_orchestrator()
+            result = await orchestrator.process(
+                user_message=approval.user_message,
+                user_id=approval.user_id,
+                conversation_id=approval.conversation_id,
+                max_iterations=3,
+                approval_override=True,
+            )
+            approval_service.resolve(approval_id, approved=True, result=result)
+            response_text = result.get("output", "Approved action completed.")
+            await self._send_text_response(
+                chat_id=chat_id,
+                text=response_text,
+                reply_to_message_id=reply_to_message_id,
+                thread_id=thread_id,
+            )
+        except Exception as e:
+            logger.error(f"Telegram approval resume error: {e}")
+            await self._send_text_response(
+                chat_id=chat_id,
+                text=f"Failed to continue approved action: {str(e)[:200]}",
+                reply_to_message_id=reply_to_message_id,
                 thread_id=thread_id,
             )
 
@@ -349,7 +466,7 @@ class TelegramBotService:
                     payload={
                         "offset": self._offset + 1,
                         "timeout": 30,
-                        "allowed_updates": ["message", "channel_post"],
+                        "allowed_updates": ["message", "channel_post", "callback_query"],
                     },
                 )
                 for upd in updates or []:
@@ -357,6 +474,9 @@ class TelegramBotService:
                     msg = upd.get("message") or upd.get("channel_post")
                     if msg:
                         await self._process_message(msg)
+                    callback_query = upd.get("callback_query")
+                    if callback_query:
+                        await self._process_callback_query(callback_query)
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -383,4 +503,3 @@ class TelegramBotService:
 
 
 telegram_bot_service = TelegramBotService()
-

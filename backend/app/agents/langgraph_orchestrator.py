@@ -6,6 +6,7 @@ All agents: coding, desktop, web, general
 from typing import Dict, Any, TypedDict, List, Annotated, Optional, Callable
 from datetime import datetime, timezone, timedelta
 import operator
+import re
 import uuid
 from loguru import logger
 
@@ -406,12 +407,19 @@ class LangGraphOrchestrator:
                 content="""You are a Desktop Control Agent. Parse the user's request into ONE OR MORE desktop actions.
 
 Available skills and their arguments:
-- screenshot: {"region": null, "monitor": 1, "format": "base64"}
-- mouse_control: {"action": "move|click|double_click|right_click|scroll", "x": int, "y": int, "button": "left|right", "clicks": 1, "direction": "up|down", "amount": 3}
-- keyboard_control: {"action": "type|press|hotkey", "text": "string", "key": "string", "keys": ["ctrl", "c"], "interval": 0.05}
-- app_launcher: {"app": "app_name", "wait": false}
-- window_manager: {"action": "list|focus|minimize|maximize|close", "title": "window_title"}
-- screen_reader: {"language": "eng", "region": null}
+- take_screenshot: {"region": "x,y,width,height"}
+- mouse_move: {"x": int, "y": int}
+- mouse_click: {"x": int, "y": int, "button": "left|right|middle", "clicks": 1}
+- mouse_scroll: {"amount": int}
+- type_text: {"text": "string"}
+- press_key: {"key": "string"}
+- press_hotkey: {"keys": "ctrl+c"}
+- open_application: {"name": "app_name"}
+- list_windows: {}
+- focus_window: {"title": "window_title"}
+- minimize_window: {"title": "window_title"}
+- maximize_window: {"title": "window_title"}
+- read_screen_text: {}
 
 Respond EXACTLY in this format (one action per line):
 ACTION: skill_name | {"arg1": "value1", "arg2": "value2"}
@@ -420,16 +428,16 @@ EXPLANATION: Brief description of what you're doing
 
 Examples:
 User: "open chrome"
-ACTION: app_launcher | {"app": "chrome", "wait": false}
+ACTION: open_application | {"name": "chrome"}
 EXPLANATION: Opening Google Chrome browser
 
 User: "take a screenshot"
-ACTION: screenshot | {"monitor": 1, "format": "base64"}
+ACTION: take_screenshot | {}
 EXPLANATION: Taking a screenshot of your desktop
 
 User: "type hello world in notepad"
-ACTION: app_launcher | {"app": "notepad", "wait": true}
-ACTION: keyboard_control | {"action": "type", "text": "hello world"}
+ACTION: open_application | {"name": "notepad"}
+ACTION: type_text | {"text": "hello world"}
 EXPLANATION: Opening Notepad and typing hello world"""
             ))
             
@@ -464,23 +472,23 @@ EXPLANATION: Opening Notepad and typing hello world"""
                 # LLM didn't produce parseable actions, try a simple fallback
                 msg_lower = state['user_message'].lower()
                 if any(kw in msg_lower for kw in ['screenshot', 'screen shot', 'capture screen']):
-                    actions = [('screenshot', {'monitor': 1, 'format': 'base64'})]
+                    actions = [('take_screenshot', {})]
                     explanation = 'Taking a screenshot'
                 elif any(kw in msg_lower for kw in ['open ', 'launch ', 'start ']):
                     for kw in ['open ', 'launch ', 'start ']:
                         if kw in msg_lower:
                             app_name = msg_lower.split(kw, 1)[1].strip().split()[0] if msg_lower.split(kw, 1)[1].strip() else ''
                             if app_name:
-                                actions = [('app_launcher', {'app': app_name, 'wait': False})]
+                                actions = [('open_application', {'name': app_name})]
                                 explanation = f'Opening {app_name}'
                             break
                 elif 'type ' in msg_lower:
                     text = state['user_message'].split('type ', 1)[1].strip() if 'type ' in state['user_message'].lower() else ''
                     if text:
-                        actions = [('keyboard_control', {'action': 'type', 'text': text})]
+                        actions = [('type_text', {'text': text})]
                         explanation = 'Typing text'
                 elif any(kw in msg_lower for kw in ['click', 'mouse']):
-                    actions = [('mouse_control', {'action': 'click'})]
+                    actions = [('mouse_click', {'button': 'left'})]
                     explanation = 'Clicking mouse'
             
             # Step 4: Execute each action via desktop bridge
@@ -509,32 +517,29 @@ EXPLANATION: Opening Notepad and typing hello world"""
                 res = r['result']
                 if res.get('success'):
                     result_data = res.get('result', {})
-                    if skill == 'screenshot':
+                    if skill == 'take_screenshot':
                         output_parts.append("✅ Screenshot captured successfully")
-                    elif skill == 'app_launcher':
-                        output_parts.append(f"✅ Application launched: {r['args'].get('app', 'unknown')}")
-                    elif skill == 'keyboard_control':
-                        action = r['args'].get('action', '')
-                        if action == 'type':
-                            output_parts.append("✅ Typed text successfully")
-                        elif action == 'press':
-                            output_parts.append(f"✅ Key pressed: {r['args'].get('key', '')}")
-                        elif action == 'hotkey':
-                            output_parts.append(f"✅ Hotkey pressed: {'+'.join(r['args'].get('keys', []))}")
-                        else:
-                            output_parts.append("✅ Keyboard action completed")
-                    elif skill == 'mouse_control':
-                        output_parts.append(f"✅ Mouse action completed: {r['args'].get('action', 'click')}")
-                    elif skill == 'window_manager':
-                        action = r['args'].get('action', '')
-                        if action == 'list' and isinstance(result_data, dict):
+                    elif skill == 'open_application':
+                        output_parts.append(f"✅ Application launched: {r['args'].get('name', 'unknown')}")
+                    elif skill == 'type_text':
+                        output_parts.append("✅ Typed text successfully")
+                    elif skill == 'press_key':
+                        output_parts.append(f"✅ Key pressed: {r['args'].get('key', '')}")
+                    elif skill == 'press_hotkey':
+                        output_parts.append(f"✅ Hotkey pressed: {r['args'].get('keys', '')}")
+                    elif skill in {'mouse_click', 'mouse_move', 'mouse_scroll'}:
+                        output_parts.append(f"✅ Mouse action completed: {skill.replace('_', ' ')}")
+                    elif skill == 'list_windows':
+                        if isinstance(result_data, dict):
                             windows = result_data.get('windows', [])
                             output_parts.append(f"✅ Found {len(windows)} windows")
                             for w in windows[:10]:
                                 if isinstance(w, dict):
                                     output_parts.append(f"  - {w.get('title', 'Unknown')}")
-                        else:
-                            output_parts.append(f"✅ Window action completed: {action}")
+                    elif skill in {'focus_window', 'minimize_window', 'maximize_window'}:
+                        output_parts.append(f"✅ Window action completed: {skill.replace('_', ' ')}")
+                    elif skill == 'read_screen_text':
+                        output_parts.append("✅ Screen text read successfully")
                     else:
                         output_parts.append(f"✅ {skill} executed successfully")
                 else:
@@ -757,60 +762,113 @@ EXPLANATION: Opening Notepad and typing hello world"""
             state['success'] = False
         
         return state
+
+    def _format_recent_conversation_history(
+        self,
+        conversation_history: list,
+        limit: int = 6,
+        max_chars: int = 500,
+    ) -> str:
+        """Build a compact recent-history block for follow-up specialist prompts."""
+        if not conversation_history:
+            return ""
+
+        lines = []
+        for msg in conversation_history[-limit:]:
+            role = msg.get('role', 'user') if isinstance(msg, dict) else 'user'
+            content = msg.get('content', '') if isinstance(msg, dict) else str(msg)
+            if len(content) > max_chars:
+                content = content[:max_chars] + "..."
+            lines.append(f"{role}: {content}")
+        return "\n".join(lines)
+
+    def _extract_latest_draft_id(self, conversation_history: list) -> str:
+        """Extract the most recent Gmail draft id from prior assistant messages."""
+        if not conversation_history:
+            return ""
+
+        for msg in reversed(conversation_history):
+            content = msg.get('content', '') if isinstance(msg, dict) else str(msg)
+            match = re.search(r"Draft ID:\s*(\S+)", content, re.IGNORECASE)
+            if match:
+                return match.group(1).strip('_').strip('*')
+        return ""
+
+    def _is_email_send_confirmation(self, user_message: str) -> bool:
+        """Detect short follow-ups that mean 'send the previously drafted email'."""
+        normalized = user_message.strip().lower()
+        exact_phrases = {
+            "send it",
+            "yes send",
+            "send the email",
+            "send the draft",
+            "go ahead",
+            "go ahead and send",
+            "yes, send the email",
+        }
+        return normalized in exact_phrases
+
+    def _is_explicit_send_email_request(self, user_message: str) -> bool:
+        """Detect a first-turn request that clearly asks to send, not just draft, an email."""
+        message_lower = user_message.lower()
+        return any(
+            phrase in message_lower
+            for phrase in [
+                "send email",
+                "send an email",
+                "send the email",
+                "send mail",
+            ]
+        )
     
     async def _email_agent_node(self, state: AgentState) -> AgentState:
-        """Email specialist - Gmail operations via LLM intent parsing"""
-        logger.info("📧 Email Agent processing...")
-        
+        """Email specialist - Gmail operations via LLM intent parsing."""
+        logger.info("Email Agent processing...")
+
         try:
             from app.services.gmail_service import gmail_service
             from app.services.google_auth_service import google_auth_service
-            
+
             user_id = state['user_id']
             user_message = state['user_message']
             conversation_history = state.get('conversation_history', [])
-            
-            # Check if Google is connected
+            history_text = self._format_recent_conversation_history(conversation_history)
+            approval_override = bool(state.get('metadata', {}).get('approval_override'))
+            recent_draft_id = self._extract_latest_draft_id(conversation_history)
+
             if not google_auth_service.is_connected(user_id):
                 state['current_output'] = (
-                    "📧 **Google Account Not Connected**\n\n"
-                    "To use email features, please connect your Google account first:\n"
-                    "Click **Connect Google** in the settings panel, or say 'connect google'.\n\n"
-                    "Once connected, I can:\n"
+                    "Email features require a connected Google account.\n\n"
+                    "Connect Google from the settings panel, then I can:\n"
                     "- Read your inbox\n"
-                    "- Send emails (with your approval)\n"
+                    "- Send emails with confirmation\n"
                     "- Search emails\n"
                     "- Check unread count\n"
-                    "- Archive/trash messages"
+                    "- Archive or trash messages"
                 )
                 state['final_output'] = state['current_output']
                 state['agent_path'].append('email_specialist')
                 state['success'] = False
                 return state
-            
-            # Build conversation context so LLM knows about previous drafts
-            history_text = ""
-            if conversation_history:
-                recent = conversation_history[-6:]  # Last 6 messages for context
-                for msg in recent:
-                    role = msg.get('role', 'user')
-                    content = msg.get('content', '')
-                    # Truncate long messages but keep draft IDs visible
-                    if len(content) > 500:
-                        content = content[:500] + "..."
-                    history_text += f"{role}: {content}\n"
-            
-            # Use LLM to parse email intent
-            messages = [
-                Message(
-                    role=MessageRole.SYSTEM,
-                    content="""You are an Email Agent. Parse the user's request into a Gmail action.
+
+            action = ""
+            args = {}
+            explanation = ""
+
+            if self._is_email_send_confirmation(user_message) and recent_draft_id:
+                action = 'SEND_DRAFT'
+                explanation = "Sending the previously composed draft."
+            else:
+                messages = [
+                    Message(
+                        role=MessageRole.SYSTEM,
+                        content="""You are an Email Agent. Parse the user's request into a Gmail action.
 
 Available actions:
 - LIST_EMAILS: List inbox emails. Args: {"query": "", "max_results": 10}
 - READ_EMAIL: Read specific email. Args: {"message_id": "..."}
 - SEARCH_EMAILS: Search with query. Args: {"query": "from:alice subject:report", "max_results": 10}
-- COMPOSE_EMAIL: Draft an email (NOT send). Args: {"to": "email@example.com", "subject": "...", "body": "..."}
+- COMPOSE_EMAIL: Prepare an email. Args: {"to": "email@example.com", "subject": "...", "body": "..."}
 - SEND_DRAFT: Send a previously composed draft. Args: {"draft_id": "..."}
 - UNREAD_COUNT: Check unread count. Args: {}
 - MARK_READ: Mark email as read. Args: {"message_id": "..."}
@@ -818,249 +876,268 @@ Available actions:
 - TRASH: Trash email. Args: {"message_id": "..."}
 
 CRITICAL RULES:
-1. For COMPOSE_EMAIL: Create a professional email body. NEVER send directly — always draft first.
-2. For SEND_DRAFT: When user says "send it", "yes send", "go ahead", "send the email", "send the draft" — use SEND_DRAFT. You do NOT need to provide the draft_id — the system will extract it automatically from conversation history. Just use ARGS: {}
-3. For SEARCH: Use Gmail query syntax (from:, to:, subject:, is:unread, after:, before:, has:attachment, in:sent, in:inbox)
-4. If user just says "check email" or "any new email" → LIST_EMAILS with query "is:unread"
-5. If user asks about "last sent email", "emails I sent", "my sent mail" → use SEARCH_EMAILS with query "in:sent" and max_results 1-5.
-6. For READ_EMAIL: ONLY use a real message_id from a previous LIST_EMAILS/SEARCH_EMAILS result. NEVER invent or guess a message_id.
-7. If user asks about a specific email but you don't have its message_id, use SEARCH_EMAILS first to find it.
-
-Examples:
-User: "send it" (after composing a draft)
-ACTION: SEND_DRAFT
-ARGS: {}
-EXPLANATION: Sending the previously composed draft
-
-User: "what was the last email I sent"
-ACTION: SEARCH_EMAILS
-ARGS: {"query": "in:sent", "max_results": 1}
-EXPLANATION: Finding the last sent email
+1. For COMPOSE_EMAIL: create a professional email body with complete to, subject, and body fields.
+2. If APPROVAL_GRANTED is true and the user explicitly asked to send the email, still return COMPOSE_EMAIL with complete fields so the system can send it immediately.
+3. For SEND_DRAFT: when user says "send it", "yes send", "go ahead", "send the email", or "send the draft", use SEND_DRAFT. The system will extract the draft id from history.
+4. For SEARCH: use Gmail query syntax (from:, to:, subject:, is:unread, after:, before:, has:attachment, in:sent, in:inbox).
+5. If user just says "check email" or "any new email", use LIST_EMAILS with query "is:unread".
+6. If user asks about "last sent email", "emails I sent", or "my sent mail", use SEARCH_EMAILS with query "in:sent" and max_results 1-5.
+7. For READ_EMAIL: only use a real message_id from a previous LIST_EMAILS or SEARCH_EMAILS result. Never invent or guess it.
+8. If user asks about a specific email but you do not have its message_id, use SEARCH_EMAILS first to find it.
+9. Keep Gmail, inbox, email, and mail requests in EMAIL. Do not treat them like generic web browsing.
 
 Respond EXACTLY in this format:
 ACTION: <action_name>
 ARGS: <json_args>
-EXPLANATION: <brief description>"""
-                ),
-                Message(
-                    role=MessageRole.USER,
-                    content=f"CONVERSATION HISTORY:\n{history_text}\n\nCURRENT REQUEST: {user_message}"
-                    if history_text else user_message
-                )
-            ]
-            
-            llm_result = await self.llm.generate_response(messages)
-            llm_response = llm_result.get('response', '')
-            
-            import json as json_module
-            action = ""
-            args = {}
-            explanation = ""
-            
-            for line in llm_response.split('\n'):
-                line = line.strip()
-                if line.startswith('ACTION:'):
-                    action = line.split(':', 1)[1].strip().upper()
-                elif line.startswith('ARGS:'):
-                    try:
-                        args = json_module.loads(line.split(':', 1)[1].strip())
-                    except:
-                        args = {}
-                elif line.startswith('EXPLANATION:'):
-                    explanation = line.split(':', 1)[1].strip()
-            
-            # Execute the parsed action
+EXPLANATION: <brief description>""",
+                    ),
+                    Message(
+                        role=MessageRole.USER,
+                        content=(
+                            f"APPROVAL_GRANTED: {approval_override}\n\n"
+                            f"CONVERSATION HISTORY:\n{history_text}\n\n"
+                            f"CURRENT REQUEST: {user_message}"
+                        )
+                        if history_text
+                        else f"APPROVAL_GRANTED: {approval_override}\nCURRENT REQUEST: {user_message}",
+                    ),
+                ]
+
+                llm_result = await self.llm.generate_response(messages)
+                llm_response = llm_result.get('response', '')
+
+                import json as json_module
+
+                for line in llm_response.split('\n'):
+                    line = line.strip()
+                    if line.startswith('ACTION:'):
+                        action = line.split(':', 1)[1].strip().upper()
+                    elif line.startswith('ARGS:'):
+                        try:
+                            args = json_module.loads(line.split(':', 1)[1].strip())
+                        except Exception:
+                            args = {}
+                    elif line.startswith('EXPLANATION:'):
+                        explanation = line.split(':', 1)[1].strip()
+
             output = ""
-            
-            if action == 'LIST_EMAILS' or action == 'SEARCH_EMAILS':
+
+            if action in {'LIST_EMAILS', 'SEARCH_EMAILS'}:
                 query = args.get('query', '')
                 max_results = args.get('max_results', 10)
                 emails = gmail_service.list_emails(user_id, query=query, max_results=max_results)
-                
+
                 if emails:
-                    output = f"📧 **{len(emails)} emails found**"
+                    output = f"Found {len(emails)} emails"
                     if query:
                         output += f" (query: {query})"
                     output += "\n\n"
-                    for i, email in enumerate(emails, 1):
-                        unread = "🔵 " if email['is_unread'] else ""
-                        output += f"{i}. {unread}**{email['subject']}**\n"
+                    for index, email in enumerate(emails, 1):
+                        unread = "[unread] " if email['is_unread'] else ""
+                        output += f"{index}. {unread}{email['subject']}\n"
                         output += f"   From: {email['from']} | {email['date']}\n"
                         output += f"   {email['snippet'][:100]}\n\n"
                 else:
-                    output = "📭 No emails found matching your criteria."
-            
+                    output = "No emails found matching your criteria."
+
             elif action == 'READ_EMAIL':
                 msg_id = args.get('message_id', '')
-                # Validate: real Gmail message IDs are hex strings, not words
-                if msg_id and len(msg_id) > 5 and ' ' not in msg_id and not any(w in msg_id.lower() for w in ['last', 'sent', 'first', 'recent', 'email', 'mail', 'message']):
+                if msg_id and len(msg_id) > 5 and ' ' not in msg_id and not any(
+                    word in msg_id.lower() for word in ['last', 'sent', 'first', 'recent', 'email', 'mail', 'message']
+                ):
                     email = gmail_service.read_email(user_id, msg_id)
-                    output = f"📧 **{email['subject']}**\n"
-                    output += f"From: {email['from']}\n"
-                    output += f"To: {email['to']}\n"
-                    output += f"Date: {email['date']}\n\n"
-                    output += f"{email['body'][:2000]}"
+                    output = (
+                        f"{email['subject']}\n"
+                        f"From: {email['from']}\n"
+                        f"To: {email['to']}\n"
+                        f"Date: {email['date']}\n\n"
+                        f"{email['body'][:2000]}"
+                    )
                     if email['attachments']:
-                        output += f"\n\n📎 Attachments: {', '.join(a['filename'] for a in email['attachments'])}"
+                        output += f"\n\nAttachments: {', '.join(a['filename'] for a in email['attachments'])}"
                 else:
-                    # Fallback: search for it instead
-                    logger.warning(f"⚠️ Invalid message_id '{msg_id}', falling back to search")
+                    logger.warning(f"Invalid message_id '{msg_id}', falling back to sent-mail lookup")
                     emails = gmail_service.list_emails(user_id, query='in:sent', max_results=1)
                     if emails:
                         first = emails[0]
                         email = gmail_service.read_email(user_id, first['id'])
-                        output = f"📧 **Your last sent email:**\n\n"
-                        output += f"**{email['subject']}**\n"
-                        output += f"From: {email['from']}\n"
-                        output += f"To: {email['to']}\n"
-                        output += f"Date: {email['date']}\n\n"
-                        output += f"{email['body'][:2000]}"
+                        output = (
+                            "Your last sent email:\n\n"
+                            f"{email['subject']}\n"
+                            f"From: {email['from']}\n"
+                            f"To: {email['to']}\n"
+                            f"Date: {email['date']}\n\n"
+                            f"{email['body'][:2000]}"
+                        )
                     else:
-                        output = "📭 No sent emails found."
-            
+                        output = "No sent emails found."
+
             elif action == 'COMPOSE_EMAIL':
                 to = args.get('to', '')
                 subject = args.get('subject', '')
                 body = args.get('body', '')
-                
+                should_send_direct = approval_override and self._is_explicit_send_email_request(user_message)
+
                 if to and subject:
-                    draft = gmail_service.compose_draft(
-                        user_id=user_id, to=to, subject=subject, body=body
-                    )
-                    output = (
-                        f"📝 **Email Draft Created**\n\n"
-                        f"**To:** {to}\n"
-                        f"**Subject:** {subject}\n"
-                        f"**Body:**\n{body}\n\n"
-                        f"---\n"
-                        f"⚠️ **This email has NOT been sent yet.** It's saved as a draft.\n"
-                        f"Say **\"send it\"** or **\"yes, send the email\"** to send it.\n"
-                        f"Say **\"cancel\"** or **\"don't send\"** to discard.\n\n"
-                        f"_Draft ID: {draft['draft_id']}_"
-                    )
+                    if should_send_direct:
+                        result = gmail_service.send_email_direct(
+                            user_id=user_id,
+                            to=to,
+                            subject=subject,
+                            body=body,
+                        )
+                        output = (
+                            "Email sent successfully.\n\n"
+                            f"To: {to}\n"
+                            f"Subject: {subject}\n"
+                            f"Message ID: {result.get('message_id', 'sent')}"
+                        )
+                    else:
+                        draft = gmail_service.compose_draft(
+                            user_id=user_id,
+                            to=to,
+                            subject=subject,
+                            body=body,
+                        )
+                        output = (
+                            "Email draft created.\n\n"
+                            f"To: {to}\n"
+                            f"Subject: {subject}\n"
+                            f"Body:\n{body}\n\n"
+                            "This email has not been sent yet. Say \"send it\" to send the draft.\n\n"
+                            f"Draft ID: {draft['draft_id']}"
+                        )
                 else:
-                    output = "❌ Missing required fields. Please provide: to (email), subject, and what you want to say."
-            
+                    output = "Missing required fields. Please provide the recipient, subject, and what you want to say."
+
             elif action == 'SEND_DRAFT':
-                # Always extract draft_id from conversation history (don't rely on LLM)
-                import re
-                draft_id = ''
-                if conversation_history:
-                    for msg in reversed(conversation_history):
-                        content = msg.get('content', '')
-                        match = re.search(r'Draft ID:\s*(\S+)', content)
-                        if match:
-                            draft_id = match.group(1).strip('_').strip('*')
-                            logger.info(f"📧 Found draft_id from history: {draft_id}")
-                            break
-                
-                # Fallback: use LLM-provided draft_id only if it looks like a real ID
+                draft_id = recent_draft_id
                 if not draft_id:
                     llm_draft_id = args.get('draft_id', '')
                     if llm_draft_id and len(llm_draft_id) > 5 and ' ' not in llm_draft_id:
                         draft_id = llm_draft_id
-                
+
                 if draft_id:
                     result = gmail_service.send_draft(user_id, draft_id)
-                    output = f"✅ **Email Sent Successfully!**\n\nMessage ID: {result.get('message_id', 'sent')}"
+                    output = f"Email sent successfully.\n\nMessage ID: {result.get('message_id', 'sent')}"
                 else:
-                    output = "❌ Could not find a draft to send. Please compose an email first."
-            
+                    output = "Could not find a draft to send. Please compose an email first."
+
             elif action == 'UNREAD_COUNT':
                 count = gmail_service.get_unread_count(user_id)
-                output = f"📬 You have **{count}** unread email{'s' if count != 1 else ''}."
-            
+                output = f"You have {count} unread email{'s' if count != 1 else ''}."
+
             elif action == 'MARK_READ':
                 msg_id = args.get('message_id', '')
                 if msg_id:
                     gmail_service.mark_as_read(user_id, msg_id)
-                    output = "✅ Email marked as read."
+                    output = "Email marked as read."
                 else:
-                    output = "❌ No message ID provided."
-            
+                    output = "No message ID provided."
+
             elif action == 'ARCHIVE':
                 msg_id = args.get('message_id', '')
                 if msg_id:
                     gmail_service.archive_email(user_id, msg_id)
-                    output = "✅ Email archived."
+                    output = "Email archived."
                 else:
-                    output = "❌ No message ID provided."
-            
+                    output = "No message ID provided."
+
             elif action == 'TRASH':
                 msg_id = args.get('message_id', '')
                 if msg_id:
                     gmail_service.trash_email(user_id, msg_id)
-                    output = "🗑️ Email moved to trash."
+                    output = "Email moved to trash."
                 else:
-                    output = "❌ No message ID provided."
-            
+                    output = "No message ID provided."
+
             else:
-                # Default: check unread + show recent
                 count = gmail_service.get_unread_count(user_id)
                 emails = gmail_service.list_emails(user_id, query="is:unread", max_results=5)
-                output = f"📬 You have **{count}** unread emails.\n\n"
+                output = f"You have {count} unread emails.\n\n"
                 if emails:
-                    for i, email in enumerate(emails, 1):
-                        output += f"{i}. **{email['subject']}** from {email['from']}\n"
-            
+                    for index, email in enumerate(emails, 1):
+                        output += f"{index}. {email['subject']} from {email['from']}\n"
+
             if explanation:
                 output = f"*{explanation}*\n\n{output}"
-            
+
             state['current_output'] = output
             state['final_output'] = output
             state['agent_path'].append('email_specialist')
             state['success'] = True
-            
-            logger.info(f"✅ Email action complete: {action}")
-        
-        except PermissionError as e:
-            state['current_output'] = f"🔒 {str(e)}"
+
+            logger.info(f"Email action complete: {action or 'DEFAULT'}")
+
+        except PermissionError as exc:
+            state['current_output'] = f"Permission error: {str(exc)}"
             state['final_output'] = state['current_output']
             state['agent_path'].append('email_specialist')
             state['success'] = False
-        except Exception as e:
-            logger.error(f"❌ Email agent error: {e}")
-            state['current_output'] = f"Email error: {str(e)}"
+        except Exception as exc:
+            logger.error(f"Email agent error: {exc}")
+            state['current_output'] = f"Email error: {str(exc)}"
             state['final_output'] = state['current_output']
-            state['errors'].append(f"Email agent error: {str(e)}")
+            state['errors'].append(f"Email agent error: {str(exc)}")
             state['success'] = False
-        
+
         return state
-    
+
     async def _calendar_agent_node(self, state: AgentState) -> AgentState:
-        """Calendar specialist - Google Calendar operations via LLM intent parsing"""
-        logger.info("📅 Calendar Agent processing...")
-        
+        """Calendar specialist - Google Calendar and reminder operations."""
+        logger.info("Calendar Agent processing...")
+
         try:
             from app.services.calendar_service import calendar_service
             from app.services.scheduler_service import scheduler_service
             from app.services.google_auth_service import google_auth_service
-            
+
             user_id = state['user_id']
             user_message = state['user_message']
-            
-            # Check if Google is connected
+            conversation_history = state.get('conversation_history', [])
+            history_text = self._format_recent_conversation_history(conversation_history)
+            message_lower = user_message.lower().strip()
+
             if not google_auth_service.is_connected(user_id):
                 state['current_output'] = (
-                    "📅 **Google Account Not Connected**\n\n"
-                    "To use calendar features, please connect your Google account first:\n"
-                    "Click **Connect Google** in the settings panel.\n\n"
-                    "Once connected, I can:\n"
+                    "Calendar features require a connected Google account.\n\n"
+                    "Connect Google from the settings panel, then I can:\n"
                     "- Show your schedule\n"
                     "- Create events\n"
                     "- Set reminders\n"
-                    "- Check free/busy times"
+                    "- Check free and busy times"
                 )
                 state['final_output'] = state['current_output']
                 state['agent_path'].append('calendar_specialist')
                 state['success'] = False
                 return state
-            
-            # Use LLM to parse calendar intent
-            messages = [
-                Message(
-                    role=MessageRole.SYSTEM,
-                    content="""You are a Calendar Agent. Parse the user's request into a calendar action.
+
+            action = ""
+            args = {}
+            explanation = ""
+
+            if any(phrase in message_lower for phrase in [
+                "what's on my calendar today",
+                "what is on my calendar today",
+                "today's schedule",
+                "my schedule today",
+                "calendar today",
+            ]):
+                action = 'TODAY_EVENTS'
+                explanation = "Checking today's schedule."
+            elif any(phrase in message_lower for phrase in [
+                "list reminders",
+                "show reminders",
+                "my reminders",
+                "scheduled jobs",
+            ]):
+                action = 'LIST_REMINDERS'
+                explanation = "Listing your active reminders and scheduled jobs."
+            else:
+                messages = [
+                    Message(
+                        role=MessageRole.SYSTEM,
+                        content="""You are a Calendar Agent. Parse the user's request into a calendar action.
 
 Available actions:
 - LIST_EVENTS: List upcoming events. Args: {"days": 7, "max_results": 10}
@@ -1071,84 +1148,90 @@ Available actions:
 - SET_REMINDER: Set a one-time reminder. Args: {"description": "Take medicine", "run_at": "2026-03-08T09:00:00"}
 - LIST_REMINDERS: Show active reminders. Args: {}
 
-IMPORTANT:
-- For CREATE_EVENT: Always include both start_time and end_time in ISO format (without timezone offset — the time_zone field handles it). Default time_zone is "Asia/Kolkata".
-- If user says "tomorrow at 3pm", calculate the actual date.
-- For SET_REMINDER: run_at should be a future datetime in ISO format.
-- Current date context will be in the user message.
+IMPORTANT RULES:
+1. For CREATE_EVENT: always include both start_time and end_time in ISO format without timezone offset. Use time_zone for the location timezone and default it to Asia/Kolkata.
+2. If the user says "tomorrow at 3pm" or similar relative time phrases, calculate the actual future date.
+3. For SET_REMINDER: run_at must be a future ISO datetime.
+4. Use conversation history for follow-up requests like "schedule it", "add it to calendar", or "set the reminder".
+5. Keep Google Calendar, meetings, schedules, and reminders in CALENDAR. Do not treat them like generic web browsing.
+6. If the user asks for reminders or scheduled jobs, prefer LIST_REMINDERS or SET_REMINDER instead of creating a calendar event.
 
 Respond EXACTLY:
 ACTION: <action_name>
 ARGS: <json_args>
-EXPLANATION: Brief description"""
-                ),
-                Message(
-                    role=MessageRole.USER,
-                    content=f"Current date: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}. User says: {user_message}"
-                )
-            ]
-            
-            llm_result = await self.llm.generate_response(messages)
-            llm_response = llm_result.get('response', '')
-            
-            import json as json_module
-            action = ""
-            args = {}
-            explanation = ""
-            
-            for line in llm_response.split('\n'):
-                line = line.strip()
-                if line.startswith('ACTION:'):
-                    action = line.split(':', 1)[1].strip().upper()
-                elif line.startswith('ARGS:'):
-                    try:
-                        args = json_module.loads(line.split(':', 1)[1].strip())
-                    except:
-                        args = {}
-                elif line.startswith('EXPLANATION:'):
-                    explanation = line.split(':', 1)[1].strip()
-            
+EXPLANATION: Brief description""",
+                    ),
+                    Message(
+                        role=MessageRole.USER,
+                        content=(
+                            f"Current date: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n\n"
+                            f"CONVERSATION HISTORY:\n{history_text}\n\n"
+                            f"CURRENT REQUEST: {user_message}"
+                        )
+                        if history_text
+                        else f"Current date: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\nUser says: {user_message}",
+                    ),
+                ]
+
+                llm_result = await self.llm.generate_response(messages)
+                llm_response = llm_result.get('response', '')
+
+                import json as json_module
+
+                for line in llm_response.split('\n'):
+                    line = line.strip()
+                    if line.startswith('ACTION:'):
+                        action = line.split(':', 1)[1].strip().upper()
+                    elif line.startswith('ARGS:'):
+                        try:
+                            args = json_module.loads(line.split(':', 1)[1].strip())
+                        except Exception:
+                            args = {}
+                    elif line.startswith('EXPLANATION:'):
+                        explanation = line.split(':', 1)[1].strip()
+
             output = ""
-            
+
             if action == 'LIST_EVENTS':
                 days = args.get('days', 7)
                 max_results = args.get('max_results', 10)
                 now = datetime.now(timezone.utc)
                 events = calendar_service.list_events(
-                    user_id, 
+                    user_id,
                     time_min=now,
                     time_max=now + timedelta(days=days),
-                    max_results=max_results
+                    max_results=max_results,
                 )
-                
+
                 if events:
-                    output = f"📅 **{len(events)} events in the next {days} days:**\n\n"
-                    for i, evt in enumerate(events, 1):
-                        output += f"{i}. **{evt['summary']}**\n"
-                        output += f"   📍 {evt['location']}\n" if evt['location'] else ""
-                        output += f"   🕐 {evt['start']} → {evt['end']}\n"
-                        if evt['attendees']:
-                            output += f"   👥 {', '.join(a['email'] for a in evt['attendees'][:3])}\n"
+                    output = f"{len(events)} events in the next {days} days:\n\n"
+                    for index, event in enumerate(events, 1):
+                        output += f"{index}. {event['summary']}\n"
+                        if event['location']:
+                            output += f"   Location: {event['location']}\n"
+                        output += f"   {event['start']} -> {event['end']}\n"
+                        if event['attendees']:
+                            output += f"   Attendees: {', '.join(a['email'] for a in event['attendees'][:3])}\n"
                         output += "\n"
                 else:
-                    output = f"📭 No events in the next {days} days."
-            
+                    output = f"No events in the next {days} days."
+
             elif action == 'TODAY_EVENTS':
                 events = calendar_service.get_today_events(user_id)
                 if events:
-                    output = f"📅 **Today's Schedule ({len(events)} events):**\n\n"
-                    for i, evt in enumerate(events, 1):
-                        output += f"{i}. **{evt['summary']}** — {evt['start']} to {evt['end']}\n"
-                        if evt['location']:
-                            output += f"   📍 {evt['location']}\n"
+                    output = f"Today's schedule ({len(events)} events):\n\n"
+                    for index, event in enumerate(events, 1):
+                        output += f"{index}. {event['summary']} - {event['start']} to {event['end']}\n"
+                        if event['location']:
+                            output += f"   Location: {event['location']}\n"
                 else:
-                    output = "📭 No events scheduled for today. You're free!"
-            
+                    output = "No events scheduled for today."
+
             elif action == 'CREATE_EVENT':
                 summary = args.get('summary', '')
                 start = args.get('start_time', '')
                 end = args.get('end_time', '')
-                
+
                 if summary and start and end:
                     event = calendar_service.create_event(
                         user_id=user_id,
@@ -1162,81 +1245,89 @@ EXPLANATION: Brief description"""
                         time_zone=args.get('time_zone', 'Asia/Kolkata'),
                     )
                     output = (
-                        f"✅ **Event Created!**\n\n"
-                        f"📌 **{event['summary']}**\n"
-                        f"🕐 {event['start']} → {event['end']}\n"
-                        f"🔗 [Open in Google Calendar]({event['html_link']})"
+                        "Event created.\n\n"
+                        f"{event['summary']}\n"
+                        f"{event['start']} -> {event['end']}\n"
+                        f"Open in Google Calendar: {event['html_link']}"
                     )
                 else:
-                    output = "❌ Missing info. Please provide: event title, start time, and end time."
-            
+                    output = "Missing information. Please provide the event title, start time, and end time."
+
+            elif action == 'UPDATE_EVENT':
+                event_id = args.get('event_id', '')
+                updates = args.get('updates', {})
+                if event_id and updates:
+                    result = calendar_service.update_event(user_id=user_id, event_id=event_id, updates=updates)
+                    output = f"Event updated successfully: {result.get('summary', event_id)}"
+                else:
+                    output = "Missing event id or update details."
+
             elif action == 'DELETE_EVENT':
                 event_id = args.get('event_id', '')
                 if event_id:
                     calendar_service.delete_event(user_id, event_id)
-                    output = "🗑️ Event deleted."
+                    output = "Event deleted."
                 else:
-                    output = "❌ No event ID provided."
-            
+                    output = "No event ID provided."
+
             elif action == 'SET_REMINDER':
-                desc = args.get('description', '')
+                description = args.get('description', '')
                 run_at_str = args.get('run_at', '')
-                if desc and run_at_str:
+                if description and run_at_str:
                     run_at = datetime.fromisoformat(run_at_str)
                     if run_at.tzinfo is None:
                         run_at = run_at.replace(tzinfo=timezone.utc)
-                    result = scheduler_service.add_reminder(
+                    scheduler_service.add_reminder(
                         user_id=user_id,
-                        description=desc,
+                        description=description,
                         run_at=run_at,
                     )
-                    output = f"⏰ **Reminder Set!**\n\n📌 {desc}\n🕐 {run_at.strftime('%Y-%m-%d %H:%M')}"
+                    output = f"Reminder set.\n\n{description}\n{run_at.strftime('%Y-%m-%d %H:%M')}"
                 else:
-                    output = "❌ Please provide what to remind you about and when."
-            
+                    output = "Please provide both what to remind you about and when."
+
             elif action == 'LIST_REMINDERS':
                 jobs = scheduler_service.list_jobs(user_id)
                 if jobs:
-                    output = f"⏰ **{len(jobs)} active reminders/jobs:**\n\n"
-                    for j in jobs:
-                        output += f"- **{j['description']}** ({j['type']}) — next: {j['next_run'] or 'N/A'}\n"
+                    output = f"{len(jobs)} active reminders or jobs:\n\n"
+                    for job in jobs:
+                        output += f"- {job['description']} ({job['type']}) - next: {job['next_run'] or 'N/A'}\n"
                 else:
-                    output = "📭 No active reminders or scheduled jobs."
-            
+                    output = "No active reminders or scheduled jobs."
+
             else:
-                # Default: show today's schedule
                 events = calendar_service.get_today_events(user_id)
                 if events:
-                    output = f"📅 **Today's Schedule:**\n\n"
-                    for i, evt in enumerate(events, 1):
-                        output += f"{i}. **{evt['summary']}** — {evt['start']}\n"
+                    output = "Today's schedule:\n\n"
+                    for index, event in enumerate(events, 1):
+                        output += f"{index}. {event['summary']} - {event['start']}\n"
                 else:
-                    output = "📭 Nothing on your calendar today."
-            
+                    output = "Nothing is on your calendar today."
+
             if explanation:
                 output = f"*{explanation}*\n\n{output}"
-            
+
             state['current_output'] = output
             state['final_output'] = output
             state['agent_path'].append('calendar_specialist')
             state['success'] = True
-            
-            logger.info(f"✅ Calendar action complete: {action}")
-        
-        except PermissionError as e:
-            state['current_output'] = f"🔒 {str(e)}"
+
+            logger.info(f"Calendar action complete: {action or 'DEFAULT'}")
+
+        except PermissionError as exc:
+            state['current_output'] = f"Permission error: {str(exc)}"
             state['final_output'] = state['current_output']
             state['agent_path'].append('calendar_specialist')
             state['success'] = False
-        except Exception as e:
-            logger.error(f"❌ Calendar agent error: {e}")
-            state['current_output'] = f"Calendar error: {str(e)}"
+        except Exception as exc:
+            logger.error(f"Calendar agent error: {exc}")
+            state['current_output'] = f"Calendar error: {str(exc)}"
             state['final_output'] = state['current_output']
-            state['errors'].append(f"Calendar agent error: {str(e)}")
+            state['errors'].append(f"Calendar agent error: {str(exc)}")
             state['success'] = False
-        
+
         return state
-    
+
     async def _general_agent_node(self, state: AgentState) -> AgentState:
         """General assistant"""
         logger.info("💬 General Agent processing...")
@@ -1505,7 +1596,12 @@ EXPLANATION: Brief description"""
 
         return ApprovalRequest(required=False, approval_level="none", reason="")
 
-    def _build_task_analysis(self, envelope: TaskEnvelope, state: AgentState) -> TaskAnalysis:
+    def _build_task_analysis(
+        self,
+        envelope: TaskEnvelope,
+        state: AgentState,
+        approval_override: bool = False,
+    ) -> TaskAnalysis:
         """Normalize routing, permissions, and risk into a single analysis object."""
         from app.services.permission_service import permission_service
 
@@ -1516,6 +1612,8 @@ EXPLANATION: Brief description"""
         )
         task_type = routing.get('task_type', 'general')
         approval = self._assess_approval(envelope.user_message, task_type)
+        if approval_override:
+            approval = ApprovalRequest(required=False, approval_level="none", reason="")
 
         allowed, access_reason = permission_service.check_agent_access(envelope.user_id, task_type)
         rate_allowed, rate_reason = permission_service.check_rate_limit(envelope.user_id)
@@ -1886,7 +1984,8 @@ EXPLANATION: Brief description"""
         user_id: str,
         conversation_id: str,
         max_iterations: int = 3,
-        message_callback: Optional[Callable] = None
+        message_callback: Optional[Callable] = None,
+        approval_override: bool = False,
     ) -> Dict[str, Any]:
         """Process a request through the unified planner/executor architecture."""
         logger.info(f"🚀 Processing: '{user_message[:50]}...'")
@@ -1898,6 +1997,7 @@ EXPLANATION: Brief description"""
             max_iterations=max_iterations,
             message_callback=message_callback,
         )
+        state['metadata']['approval_override'] = approval_override
         envelope = TaskEnvelope(
             user_message=user_message,
             user_id=user_id,
@@ -1914,7 +2014,11 @@ EXPLANATION: Brief description"""
             )
 
             state = await self._load_context_node(state)
-            analysis = self._build_task_analysis(envelope, state)
+            analysis = self._build_task_analysis(
+                envelope,
+                state,
+                approval_override=approval_override,
+            )
             state['task_type'] = analysis.task_type
             state['confidence'] = analysis.confidence
             state['routing_reason'] = analysis.reasoning
@@ -1958,6 +2062,18 @@ EXPLANATION: Brief description"""
                 execution_trace.extend(execution_events)
 
                 if approval_state["status"] == "required":
+                    from app.services.approval_service import approval_service
+
+                    approval_request = approval_service.create_request(
+                        user_id=envelope.user_id,
+                        conversation_id=envelope.conversation_id,
+                        user_message=envelope.user_message,
+                        reason=approval_state["reason"],
+                        channel=envelope.channel,
+                        affected_steps=approval_state.get("affected_steps", []),
+                        task_type=analysis.task_type,
+                    )
+                    approval_state["approval_id"] = approval_request.approval_id
                     state['success'] = False
                     state['final_output'] = (
                         "Approval is required before I continue.\n\n"
@@ -2564,3 +2680,5 @@ langgraph_orchestrator = LangGraphOrchestrator()
 
 # # Global instance
 # langgraph_orchestrator = LangGraphOrchestrator()
+
+
