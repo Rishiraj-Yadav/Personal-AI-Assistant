@@ -17,6 +17,7 @@ passwords.*
 *.temp
 *.log
 *.cache
+qdrant_storage/
 
 # OS files
 .DS_Store
@@ -58,7 +59,7 @@ build/
 qdrant_storage/
 .qdrant_storage
 *.qdrant_storage
-
+qdrant_storage/
 
 # Qdrant database storage
 qdrant_storage/

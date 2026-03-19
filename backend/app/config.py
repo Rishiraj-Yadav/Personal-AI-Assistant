@@ -40,8 +40,9 @@ class Settings(BaseSettings):
     # Google Gemini (fallback LLM)
     GOOGLE_API_KEY: str = ""
     
-    # Discord Bot
-    DISCORD_BOT_TOKEN: str = ""
+    # Telegram Bot
+    TELEGRAM_BOT_TOKEN: str = ""
+    TELEGRAM_ALLOWED_CHAT_IDS: str = ""
     
     # Dashboard
     DASHBOARD_BASE_URL: str = "http://localhost:8000"

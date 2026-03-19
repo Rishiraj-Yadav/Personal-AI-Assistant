@@ -1,6 +1,6 @@
 """
-User Dashboard API — OpenClaw-style web dashboard for Discord users.
-Provides token-authenticated endpoints so Discord users can view their
+User Dashboard API — OpenClaw-style web dashboard for chat users.
+Provides token-authenticated endpoints so Telegram users can view their
 conversation history, permissions, preferences, and link Google accounts.
 """
 import secrets

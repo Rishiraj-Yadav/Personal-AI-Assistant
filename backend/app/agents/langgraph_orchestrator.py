@@ -157,7 +157,7 @@ class LangGraphOrchestrator:
             )
             
             # Always load recent cross-conversation messages for this user
-            # so Discord threads (same user, different thread IDs) share context
+            # so chat threads/topics (same user, different thread IDs) share context
             all_recent = self.memory_service.get_all_user_messages(
                 user_id=state['user_id'],
                 limit=10

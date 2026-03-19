@@ -33,14 +33,14 @@ async def lifespan(app: FastAPI):
     scheduler_service.start()
     logger.info("✅ Scheduler started")
     
-    # Start Discord bot (non-blocking, runs in background)
+    # Start Telegram bot (non-blocking, runs in background)
     import asyncio
-    from app.services.discord_bot_service import discord_bot_service
-    if discord_bot_service.is_configured:
-        asyncio.create_task(discord_bot_service.start())
-        logger.info("✅ Discord bot starting in background")
+    from app.services.telegram_bot_service import telegram_bot_service
+    if telegram_bot_service.is_configured:
+        asyncio.create_task(telegram_bot_service.start())
+        logger.info("✅ Telegram bot starting in background")
     else:
-        logger.info("⏭️ Discord bot not configured (set DISCORD_BOT_TOKEN to enable)")
+        logger.info("⏭️ Telegram bot not configured (set TELEGRAM_BOT_TOKEN to enable)")
     
     # Start virtual desktop idle cleanup loop
     from app.services.virtual_desktop_service import virtual_desktop_service
@@ -55,8 +55,8 @@ async def lifespan(app: FastAPI):
     # Shutdown
     from app.services.scheduler_service import scheduler_service as sched
     sched.shutdown()
-    from app.services.discord_bot_service import discord_bot_service as dbot
-    await dbot.stop()
+    from app.services.telegram_bot_service import telegram_bot_service as tbot
+    await tbot.stop()
     logger.info(f"Shutting down {settings.APP_NAME}")
 
 

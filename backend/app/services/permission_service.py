@@ -188,7 +188,7 @@ class PermissionService:
             db.flush()
 
         # Determine default profile
-        if user_id.startswith("discord_"):
+        if user_id.startswith("telegram_"):
             profile = PERMISSION_PROFILES["remote"]
         else:
             profile = PERMISSION_PROFILES["local"]
