@@ -4,6 +4,7 @@ The brain of the desktop agent. Takes natural language commands,
 plans multi-step execution, dispatches to specialist agents via the SkillRegistry.
 Uses Gemini Flash for reasoning (ReAct pattern: Think → Act → Observe → Repeat).
 """
+import asyncio
 import json
 import google.generativeai as genai
 from typing import Dict, Any, List, Optional
@@ -29,6 +30,9 @@ You can control their computer by calling tools. You have access to these specia
 - Fetch web pages, search the web, download files
 - Schedule tasks and reminders for later
 - Send desktop notifications and speak text aloud
+- Control a LIVE VISIBLE BROWSER — navigate to URLs, search, click elements, type text,
+  scroll, read page content, take screenshots, and go back. The browser opens on the user's
+  screen so they can watch every action in real-time.
 
 RULES:
 1. Always use the available tools to accomplish tasks. Do NOT just describe what you would do.
@@ -39,6 +43,18 @@ RULES:
 6. For potentially dangerous operations (deleting files, killing processes), explain what you're about to do before doing it.
 7. When dealing with file paths on Windows, use backslashes (\\).
 8. Current user's home directory can be found in system environment variables.
+9. IMPORTANT: When the browser_check_sensitive tool reports a sensitive page (passwords,
+   payment forms, banking/login URLs), STOP immediately and report this to the user.
+   Do NOT type into password fields, payment forms, or interact with login pages without
+   explicit user approval. Return a clear message about what was blocked and why.
+10. For web tasks, prefer using the live browser (open_browser, navigate_to, browser_click, etc.)
+    over the HTTP-only web tools, as the user can see the browser in real-time.
+11. AUTONOMOUS WEB — finish the whole request in the browser. Do not stop after only opening a site.
+    If a tool errors, immediately try a different approach (browser_read_page, another selector,
+    browser_click visible text, / or Ctrl+K then type). Never declare success if key steps failed.
+12. LeetCode: if the user names a problem by NUMBER (e.g. 150), call tool leetcode_open_problem with
+    that number. The homepage often has NO textarea[placeholder=Search] — do not rely on it.
+13. Work quickly: minimize unnecessary tool calls, but do not skip required navigation/interaction.
 """
 
     def __init__(self):
@@ -77,9 +93,38 @@ RULES:
 
         return gemini_tools
 
+    def _sanitize_tool_payload_for_llm(self, obj: Any, max_depth: int = 14) -> Any:
+        """Avoid huge base64 screenshots in Gemini tool responses (token limit errors)."""
+        if max_depth <= 0:
+            return "<truncated>"
+        if isinstance(obj, dict):
+            out: Dict[str, Any] = {}
+            for k, v in obj.items():
+                kl = str(k).lower()
+                if kl in ("screenshot", "image_base64") or "base64" in kl:
+                    s = v if isinstance(v, str) else ""
+                    out[k] = f"<image data omitted, {len(s)} chars>"
+                elif kl == "evidence":
+                    out[k] = "<evidence omitted>"
+                else:
+                    out[k] = self._sanitize_tool_payload_for_llm(v, max_depth - 1)
+            return out
+        if isinstance(obj, list):
+            return [self._sanitize_tool_payload_for_llm(x, max_depth - 1) for x in obj[:40]]
+        if isinstance(obj, str) and len(obj) > 4000:
+            return obj[:4000] + "…(truncated)"
+        return obj
+
     async def process_command(self, command: str) -> Dict[str, Any]:
         """
-        Process a natural language command through the ReAct loop.
+        Async entrypoint for FastAPI. Runs the sync ReAct loop in a worker thread
+        so Playwright sync API and other blocking tools are not on the asyncio loop.
+        """
+        return await asyncio.to_thread(self.process_command_sync, command)
+
+    def process_command_sync(self, command: str) -> Dict[str, Any]:
+        """
+        Process a natural language command through the ReAct loop (blocking).
 
         Args:
             command: Natural language command from the user
@@ -129,7 +174,7 @@ RULES:
             )
 
             # ReAct loop — keep executing tool calls until the model gives a text response
-            max_iterations = 10
+            max_iterations = 18
             iteration = 0
 
             while iteration < max_iterations:
@@ -160,11 +205,14 @@ RULES:
 
                     # Execute via registry
                     result = registry.execute_tool(tool_name, tool_args)
+                    preview = result.get("result", "")
+                    if not result.get("success") and result.get("error"):
+                        preview = result.get("error")
                     actions_taken.append({
                         "tool": tool_name,
                         "args": tool_args,
                         "success": result.get("success", False),
-                        "result_preview": str(result.get("result", ""))[:200],
+                        "result_preview": str(preview)[:200],
                     })
 
                     logger.info(
@@ -172,12 +220,16 @@ RULES:
                         f"{tool_name} → {str(result)[:100]}"
                     )
 
-                    # Build function response for Gemini
+                    safe = self._sanitize_tool_payload_for_llm(result)
+                    payload = json.dumps(safe, default=str)
+                    if len(payload) > 28000:
+                        payload = payload[:28000] + "…(truncated)"
+
                     function_responses.append(
                         genai.protos.Part(
                             function_response=genai.protos.FunctionResponse(
                                 name=tool_name,
-                                response={"result": json.dumps(result, default=str)},
+                                response={"result": payload},
                             )
                         )
                     )
@@ -198,6 +250,13 @@ RULES:
             if not final_text:
                 final_text = "Done." if actions_taken else "I couldn't understand that command."
 
+            any_fail = any(not a.get("success") for a in actions_taken)
+            if any_fail and "leetcode" in command.lower():
+                final_text = (
+                    f"{final_text}\n\n"
+                    "(Some steps failed. For LeetCode by problem number, use leetcode_open_problem.)"
+                )
+
             # Update conversation history
             self._add_to_history("user", command)
             self._add_to_history("assistant", final_text)
@@ -206,7 +265,7 @@ RULES:
             return {
                 "response": final_text,
                 "actions_taken": actions_taken,
-                "success": True,
+                "success": not any_fail,
             }
 
         except Exception as e:

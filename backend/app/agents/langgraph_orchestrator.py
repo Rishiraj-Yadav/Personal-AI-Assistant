@@ -23,7 +23,9 @@ from app.agents.orchestration_models import (
     TaskEnvelope,
 )
 from app.services.context_builder import context_builder
+from app.services.desktop_execution_service import desktop_execution_service
 from app.services.enhanced_memory_service import enhanced_memory_service
+from app.services.workflow_library_service import workflow_library_service
 from app.core.llm import llm_adapter
 from app.models import Message, MessageRole
 
@@ -363,35 +365,25 @@ class LangGraphOrchestrator:
     
     async def _desktop_agent_node(self, state: AgentState) -> AgentState:
         """Desktop specialist - routes to host desktop bridge OR virtual desktop based on permissions"""
-        logger.info("🖥️ Desktop Agent processing...")
-        
+        logger.info("Desktop Agent processing...")
+
         user_id = state.get('user_id', '')
-        
-        # Check desktop access tier
+
         from app.services.permission_service import permission_service
         perms = permission_service.get_permissions(user_id)
         desktop_access = perms.get('desktop_access', 'none')
-        
+
         if desktop_access == 'virtual':
             return await self._virtual_desktop_handler(state)
-        
-        # Host desktop (default for local users)
+
         try:
             from app.skills.desktop_bridge import desktop_bridge
-            
-            # Step 1: Check if desktop agent is reachable
+
             desktop_available = await desktop_bridge.check_connection()
-            
             if not desktop_available:
-                # Desktop agent not running - provide helpful error
                 state['current_output'] = (
-                    "❌ **Desktop Agent is not running!**\n\n"
-                    "To use desktop control features, please start the Desktop Agent:\n\n"
-                    "1. Open a new terminal\n"
-                    "2. Navigate to `desktop-agent/` folder\n"
-                    "3. Run: `python desktop_agent.py`\n\n"
-                    "The Desktop Agent must run on your host machine (not in Docker) "
-                    "to control your actual desktop."
+                    "Desktop Agent is not running.\n\n"
+                    "Start it from the desktop-agent folder with `python desktop_agent.py`."
                 )
                 state['final_output'] = state['current_output']
                 state['agent_path'].append('desktop_specialist')
@@ -399,176 +391,64 @@ class LangGraphOrchestrator:
                 state['desktop_action'] = 'agent_unavailable'
                 state['desktop_result'] = {'status': 'desktop_agent_not_running'}
                 return state
-            
-            # Step 2: Use LLM to parse user intent into desktop actions
-            messages = []
-            messages.append(Message(
-                role=MessageRole.SYSTEM,
-                content="""You are a Desktop Control Agent. Parse the user's request into ONE OR MORE desktop actions.
 
-Available skills and their arguments:
-- take_screenshot: {"region": "x,y,width,height"}
-- mouse_move: {"x": int, "y": int}
-- mouse_click: {"x": int, "y": int, "button": "left|right|middle", "clicks": 1}
-- mouse_scroll: {"amount": int}
-- type_text: {"text": "string"}
-- press_key: {"key": "string"}
-- press_hotkey: {"keys": "ctrl+c"}
-- open_application: {"name": "app_name"}
-- list_windows: {}
-- focus_window: {"title": "window_title"}
-- minimize_window: {"title": "window_title"}
-- maximize_window: {"title": "window_title"}
-- read_screen_text: {}
+            step_hint = state.get('metadata', {}).get('_current_step')
+            message_callback = state.get('metadata', {}).get('_message_callback')
+            desktop_execution = await desktop_execution_service.execute(
+                user_message=state['user_message'],
+                user_id=user_id,
+                user_context=state.get('user_context', ''),
+                step_hint=step_hint,
+                message_callback=message_callback,
+                approval_granted=bool(state.get('metadata', {}).get('approval_override')),
+                resume_context=state.get('metadata', {}).get('_resume_context'),
+            )
 
-Respond EXACTLY in this format (one action per line):
-ACTION: skill_name | {"arg1": "value1", "arg2": "value2"}
-ACTION: skill_name | {"arg1": "value1"}
-EXPLANATION: Brief description of what you're doing
+            desktop_plan = desktop_execution.get('plan')
+            desktop_trace = desktop_execution.get('trace') or []
+            desktop_result = desktop_execution.get('desktop_result') or {}
+            desktop_approval_state = desktop_execution.get('approval_state') or {}
+            desktop_clarification_state = desktop_execution.get('clarification_state') or {}
 
-Examples:
-User: "open chrome"
-ACTION: open_application | {"name": "chrome"}
-EXPLANATION: Opening Google Chrome browser
-
-User: "take a screenshot"
-ACTION: take_screenshot | {}
-EXPLANATION: Taking a screenshot of your desktop
-
-User: "type hello world in notepad"
-ACTION: open_application | {"name": "notepad"}
-ACTION: type_text | {"text": "hello world"}
-EXPLANATION: Opening Notepad and typing hello world"""
-            ))
-            
-            messages.append(Message(
-                role=MessageRole.USER,
-                content=state['user_message']
-            ))
-            
-            # Get LLM to parse the intent
-            llm_result = await self.llm.generate_response(messages)
-            llm_response = llm_result.get('response', '')
-            
-            # Step 3: Parse LLM response into actions and execute them
-            import json as json_module
-            actions = []
-            explanation = ""
-            
-            for line in llm_response.split('\n'):
-                line = line.strip()
-                if line.startswith('ACTION:'):
-                    try:
-                        parts = line[7:].strip().split('|', 1)
-                        skill_name = parts[0].strip()
-                        args = json_module.loads(parts[1].strip()) if len(parts) > 1 else {}
-                        actions.append((skill_name, args))
-                    except Exception as parse_err:
-                        logger.warning(f"⚠️ Could not parse action line: {line} - {parse_err}")
-                elif line.startswith('EXPLANATION:'):
-                    explanation = line[12:].strip()
-            
-            if not actions:
-                # LLM didn't produce parseable actions, try a simple fallback
-                msg_lower = state['user_message'].lower()
-                if any(kw in msg_lower for kw in ['screenshot', 'screen shot', 'capture screen']):
-                    actions = [('take_screenshot', {})]
-                    explanation = 'Taking a screenshot'
-                elif any(kw in msg_lower for kw in ['open ', 'launch ', 'start ']):
-                    for kw in ['open ', 'launch ', 'start ']:
-                        if kw in msg_lower:
-                            app_name = msg_lower.split(kw, 1)[1].strip().split()[0] if msg_lower.split(kw, 1)[1].strip() else ''
-                            if app_name:
-                                actions = [('open_application', {'name': app_name})]
-                                explanation = f'Opening {app_name}'
-                            break
-                elif 'type ' in msg_lower:
-                    text = state['user_message'].split('type ', 1)[1].strip() if 'type ' in state['user_message'].lower() else ''
-                    if text:
-                        actions = [('type_text', {'text': text})]
-                        explanation = 'Typing text'
-                elif any(kw in msg_lower for kw in ['click', 'mouse']):
-                    actions = [('mouse_click', {'button': 'left'})]
-                    explanation = 'Clicking mouse'
-            
-            # Step 4: Execute each action via desktop bridge
-            results = []
-            all_success = True
-            
-            for skill_name, args in actions:
-                logger.info(f"🔧 Executing desktop action: {skill_name} with args: {args}")
-                action_result = await desktop_bridge.execute_skill(skill_name, args, safe_mode=False)
-                results.append({
-                    'skill': skill_name,
-                    'args': args,
-                    'result': action_result
-                })
-                if not action_result.get('success', False):
-                    all_success = False
-                    logger.warning(f"⚠️ Action {skill_name} failed: {action_result.get('error', 'unknown')}")
-            
-            # Step 5: Build response
-            output_parts = []
-            if explanation:
-                output_parts.append(f"🖥️ **{explanation}**\n")
-            
-            for r in results:
-                skill = r['skill']
-                res = r['result']
-                if res.get('success'):
-                    result_data = res.get('result', {})
-                    if skill == 'take_screenshot':
-                        output_parts.append("✅ Screenshot captured successfully")
-                    elif skill == 'open_application':
-                        output_parts.append(f"✅ Application launched: {r['args'].get('name', 'unknown')}")
-                    elif skill == 'type_text':
-                        output_parts.append("✅ Typed text successfully")
-                    elif skill == 'press_key':
-                        output_parts.append(f"✅ Key pressed: {r['args'].get('key', '')}")
-                    elif skill == 'press_hotkey':
-                        output_parts.append(f"✅ Hotkey pressed: {r['args'].get('keys', '')}")
-                    elif skill in {'mouse_click', 'mouse_move', 'mouse_scroll'}:
-                        output_parts.append(f"✅ Mouse action completed: {skill.replace('_', ' ')}")
-                    elif skill == 'list_windows':
-                        if isinstance(result_data, dict):
-                            windows = result_data.get('windows', [])
-                            output_parts.append(f"✅ Found {len(windows)} windows")
-                            for w in windows[:10]:
-                                if isinstance(w, dict):
-                                    output_parts.append(f"  - {w.get('title', 'Unknown')}")
-                    elif skill in {'focus_window', 'minimize_window', 'maximize_window'}:
-                        output_parts.append(f"✅ Window action completed: {skill.replace('_', ' ')}")
-                    elif skill == 'read_screen_text':
-                        output_parts.append("✅ Screen text read successfully")
-                    else:
-                        output_parts.append(f"✅ {skill} executed successfully")
-                else:
-                    error_msg = res.get('error', 'Unknown error')
-                    output_parts.append(f"❌ {skill} failed: {error_msg}")
-            
-            if not actions:
-                output_parts.append("⚠️ Could not determine the desktop action from your request. Try being more specific, e.g. 'open chrome', 'take a screenshot', 'type hello world'.")
-            
-            state['current_output'] = '\n'.join(output_parts)
+            state['current_output'] = desktop_execution.get('output', '')
             state['final_output'] = state['current_output']
             state['agent_path'].append('desktop_specialist')
-            state['success'] = all_success
-            state['desktop_action'] = 'executed'
-            state['desktop_result'] = {'actions': len(actions), 'results': [{'skill': r['skill'], 'success': r['result'].get('success')} for r in results]}
-            
-            logger.info(f"✅ Desktop actions complete: {len(actions)} actions, success={all_success}")
-        
+            state['success'] = desktop_execution.get('success', False)
+            state['desktop_action'] = 'executed' if state['success'] else 'failed'
+            state['desktop_result'] = desktop_result
+            state['metadata'] = {
+                **state.get('metadata', {}),
+                'desktop_plan': desktop_plan.model_dump() if hasattr(desktop_plan, 'model_dump') else desktop_plan,
+                'desktop_execution_trace': [
+                    event.model_dump() if hasattr(event, 'model_dump') else event
+                    for event in desktop_trace
+                ],
+                'desktop_evidence': desktop_result.get('evidence', []),
+                '_approval_state': desktop_approval_state,
+                '_clarification_state': desktop_clarification_state,
+                '_specialist_trace_events': desktop_trace,
+            }
+            if desktop_plan and getattr(desktop_plan, 'workflow_key', None):
+                state['metadata']['workflow_key'] = desktop_plan.workflow_key
+                state['metadata']['workflow_name'] = desktop_plan.workflow_name
+                state['metadata']['workflow_source'] = desktop_plan.workflow_source
+
+            logger.info(
+                f"Desktop execution finished with "
+                f"{desktop_result.get('steps_completed', 0)}/{desktop_result.get('steps_total', 0)} verified steps"
+            )
+
         except Exception as e:
-            logger.error(f"❌ Desktop agent error: {e}")
+            logger.error(f"Desktop agent error: {e}")
             import traceback
             logger.error(traceback.format_exc())
             state['current_output'] = f"Desktop control error: {str(e)}"
             state['final_output'] = state['current_output']
             state['errors'].append(f"Desktop agent error: {str(e)}")
             state['success'] = False
-        
+
         return state
-    
+
     async def _virtual_desktop_handler(self, state: AgentState) -> AgentState:
         """Handle desktop actions in a virtual Xvfb sandbox for remote users."""
         logger.info("🖥️ Virtual Desktop handler for remote user...")
@@ -688,41 +568,189 @@ EXPLANATION: Opening Notepad and typing hello world"""
     async def _web_autonomous_agent_node(self, state: AgentState) -> AgentState:
         """
         Autonomous Web Agent — Perplexity Comet-style browser automation.
-        
-        Capabilities:
-        - Navigate to any URL and understand page content
-        - Take screenshots and read DOM to comprehend pages
-        - Execute multi-step browsing tasks autonomously
-        - Ask for user permission before sensitive actions
-        - Extract and summarize information from web pages
-        - Integrate with memory for personalized web browsing
+
+        Strategy:
+        1. Try the Desktop Agent's live browser first (visible on user's screen).
+        2. If the Desktop Agent is unavailable, fall back to the headless
+           web_agent_service running in Docker.
+        3. If the live browser reports a sensitive-action-blocked error,
+           create an approval request so the user can approve/deny via the
+           Web UI or Telegram.
         """
         logger.info("🌐 Web Autonomous Agent processing...")
-        
+
+        user_id = state['user_id']
+        user_message = state['user_message']
+
+        def _live_browser_looks_failed(actions: list, response_text: str) -> bool:
+            """True if Playwright on the host failed; backend should use headless fallback."""
+            blob = (response_text or "").lower()
+            phrases = (
+                "failed to open browser",
+                "browser failed",
+                "could not open the browser",
+                "playwright is not installed",
+                "no usable browser",
+                "could not launch",
+                "browser launch failed",
+                "underlying issue",
+                "cannot resolve",
+            )
+            if any(p in blob for p in phrases):
+                return True
+            opens = [a for a in (actions or []) if a.get("tool") == "open_browser"]
+            if opens:
+                if any(a.get("success") for a in opens):
+                    return False
+                return True
+            return False
+
         try:
+            from app.skills.desktop_bridge import desktop_bridge
+
+            desktop_available = await desktop_bridge.check_connection()
+
+            if desktop_available:
+                logger.info("🖥️ Desktop Agent available — using LIVE browser")
+                result = await desktop_bridge.execute_nl_command(
+                    f"Open the browser and complete this web task: {user_message}",
+                    timeout_seconds=120,
+                )
+
+                actions = result.get("actions_taken", [])
+                response_text = result.get("response", "")
+
+                if _live_browser_looks_failed(actions, response_text):
+                    logger.warning(
+                        "Live Playwright on the host failed — falling back to headless web agent in Docker"
+                    )
+                    from app.services.web_agent_service import web_agent_service
+
+                    conversation_history = state.get('conversation_history', [])
+                    user_context = state.get('user_context', '')
+                    callback = state.get('metadata', {}).get('_message_callback')
+                    headless = await web_agent_service.execute_task(
+                        user_message=user_message,
+                        user_id=user_id,
+                        conversation_history=[
+                            msg for msg in conversation_history if isinstance(msg, dict)
+                        ],
+                        user_context=user_context,
+                        message_callback=callback,
+                    )
+                    note = (
+                        "The on-screen (Playwright) browser on your PC could not start, "
+                        "so this run used the **headless browser inside Docker** instead. "
+                        "To fix the live window: in the same terminal/venv you use for the Desktop Agent, run "
+                        "`pip install playwright` then `python -m playwright install chromium`, "
+                        "then restart `desktop_agent.py`.\n\n"
+                    )
+                    state['current_output'] = note + (headless.get('output') or '')
+                    state['final_output'] = state['current_output']
+                    state['agent_path'].append('web_autonomous_agent')
+                    state['success'] = headless.get('success', False)
+                    state['web_screenshots'] = headless.get('screenshots', [])
+                    state['web_actions'] = headless.get('actions_taken', [])
+                    state['web_current_url'] = headless.get('current_url', '')
+                    state['web_permission_needed'] = headless.get('permission_needed') or {}
+                    state['metadata'] = {
+                        **state.get('metadata', {}),
+                        'web_screenshots': headless.get('screenshots', [])[-1:],
+                        'web_actions_count': len(headless.get('actions_taken', [])),
+                        'web_current_url': headless.get('current_url', ''),
+                        'web_autonomous': True,
+                        'web_live_browser': False,
+                        'web_fallback_headless': True,
+                    }
+                    return state
+
+                screenshots = []
+                for action in actions:
+                    preview = action.get("result_preview", "")
+                    if "screenshot" in preview.lower() and "base64" in preview.lower():
+                        screenshots.append(preview)
+
+                sensitive_blocked = any(
+                    "sensitive_action_blocked" in str(a.get("result_preview", "")).lower()
+                    for a in actions
+                ) or "sensitive_action_blocked" in response_text.lower()
+
+                if sensitive_blocked:
+                    logger.warning("🔒 Sensitive action blocked by live browser — requesting approval")
+                    state['current_output'] = (
+                        "The live browser detected a sensitive page (login, payment, or password fields). "
+                        "User approval is required before continuing.\n\n"
+                        f"Details: {response_text}"
+                    )
+                    state['final_output'] = state['current_output']
+                    state['agent_path'].append('web_autonomous_agent')
+                    state['success'] = False
+                    state['web_permission_needed'] = {
+                        "reason": "Sensitive page detected by live browser",
+                        "details": response_text,
+                    }
+
+                    state['metadata'] = {
+                        **state.get('metadata', {}),
+                        'web_autonomous': True,
+                        'web_live_browser': True,
+                        'web_sensitive_blocked': True,
+                        'approval_required': True,
+                        'approval_reason': (
+                            "The browser encountered a sensitive page "
+                            "(password fields, payment form, or login page). "
+                            "Please approve to continue."
+                        ),
+                    }
+                    return state
+
+                state['current_output'] = response_text or "Web task completed via live browser."
+                state['final_output'] = state['current_output']
+                state['agent_path'].append('web_autonomous_agent')
+                state['success'] = result.get("success", False)
+                state['web_screenshots'] = screenshots
+                state['web_actions'] = actions
+                state['web_current_url'] = ""
+                state['web_permission_needed'] = {}
+
+                state['metadata'] = {
+                    **state.get('metadata', {}),
+                    'web_screenshots': screenshots[-1:] if screenshots else [],
+                    'web_actions_count': len(actions),
+                    'web_autonomous': True,
+                    'web_live_browser': True,
+                }
+
+                if user_id and result.get("success"):
+                    self.memory_service.learn_from_behavior(user_id, {
+                        'task_type': 'web_autonomous',
+                        'success': True,
+                        'actions_count': len(actions),
+                        'live_browser': True,
+                    })
+
+                logger.info(
+                    f"✅ Live browser task complete: {len(actions)} actions"
+                )
+                return state
+
+            logger.info("🐳 Desktop Agent unavailable — falling back to headless browser")
             from app.services.web_agent_service import web_agent_service
-            
-            user_id = state['user_id']
-            user_message = state['user_message']
+
             conversation_history = state.get('conversation_history', [])
             user_context = state.get('user_context', '')
-            
-            # Progress callback — forward to message_callback if available
             callback = state.get('metadata', {}).get('_message_callback')
-            
-            # Execute the autonomous web task
+
             result = await web_agent_service.execute_task(
                 user_message=user_message,
                 user_id=user_id,
                 conversation_history=[
-                    msg for msg in conversation_history
-                    if isinstance(msg, dict)
+                    msg for msg in conversation_history if isinstance(msg, dict)
                 ],
                 user_context=user_context,
                 message_callback=callback,
             )
-            
-            # Set outputs
+
             state['current_output'] = result.get('output', 'Web task completed.')
             state['final_output'] = state['current_output']
             state['agent_path'].append('web_autonomous_agent')
@@ -731,17 +759,16 @@ EXPLANATION: Opening Notepad and typing hello world"""
             state['web_actions'] = result.get('actions_taken', [])
             state['web_current_url'] = result.get('current_url', '')
             state['web_permission_needed'] = result.get('permission_needed') or {}
-            
-            # Store metadata for frontend
+
             state['metadata'] = {
                 **state.get('metadata', {}),
-                'web_screenshots': result.get('screenshots', [])[-1:],  # last screenshot
+                'web_screenshots': result.get('screenshots', [])[-1:],
                 'web_actions_count': len(result.get('actions_taken', [])),
                 'web_current_url': result.get('current_url', ''),
                 'web_autonomous': True,
+                'web_live_browser': False,
             }
-            
-            # Learn from web browsing behavior
+
             if user_id and result.get('success'):
                 self.memory_service.learn_from_behavior(user_id, {
                     'task_type': 'web_autonomous',
@@ -749,9 +776,9 @@ EXPLANATION: Opening Notepad and typing hello world"""
                     'actions_count': len(result.get('actions_taken', [])),
                     'url_visited': result.get('current_url', ''),
                 })
-            
-            logger.info(f"✅ Web autonomous complete: {len(result.get('actions_taken', []))} actions")
-        
+
+            logger.info(f"✅ Headless web task complete: {len(result.get('actions_taken', []))} actions")
+
         except Exception as e:
             logger.error(f"❌ Web autonomous agent error: {e}")
             import traceback
@@ -760,7 +787,7 @@ EXPLANATION: Opening Notepad and typing hello world"""
             state['final_output'] = state['current_output']
             state['errors'].append(f"Web autonomous error: {str(e)}")
             state['success'] = False
-        
+
         return state
 
     def _format_recent_conversation_history(
@@ -1338,6 +1365,19 @@ EXPLANATION: Brief description""",
             return state
         
         try:
+            user_message_lower = state.get('user_message', '').strip().lower()
+            if any(phrase in user_message_lower for phrase in ("what is my name", "what's my name", "do you know my name", "who am i")):
+                profile = self.memory_service.get_user_profile(state.get('user_id', ''))
+                display_name = profile.get("display_name") or (profile.get("metadata") or {}).get("display_name")
+                if display_name:
+                    state['current_output'] = f"Your name is {display_name}."
+                else:
+                    state['current_output'] = "I don't have your name stored confidently yet."
+                state['final_output'] = state['current_output']
+                state['agent_path'].append('general_assistant')
+                state['success'] = True
+                return state
+
             messages = []
             
             if state.get('user_context'):
@@ -1574,27 +1614,59 @@ EXPLANATION: Brief description""",
     def _assess_approval(self, user_message: str, task_type: str) -> ApprovalRequest:
         """Apply guarded auto-run rules at the orchestrator layer."""
         message_lower = user_message.lower()
-
-        destructive_keywords = [
-            "delete", "remove", "erase", "format", "shutdown", "reboot",
-            "kill process", "trash", "send email", "purchase", "buy",
-            "checkout", "payment", "submit", "post publicly", "deploy to production",
-            "git push", "git commit", "revoke", "archive email",
+        dangerous_keywords = [
+            "delete", "remove", "erase", "format", "wipe", "factory reset",
+            "shutdown", "reboot", "kill process", "terminate process", "trash",
+            "purchase", "buy", "checkout", "payment", "transfer money",
+            "deploy to production", "git push", "git commit", "revoke",
+            "archive email", "empty recycle bin",
         ]
-        desktop_sensitive = ["type password", "enter password", "close all", "delete file"]
+        confirm_keywords = [
+            "send email", "send mail", "send message", "send it", "submit",
+            "post publicly", "publish", "share", "install", "sign in",
+            "log in", "login", "download and move", "upload",
+            "create file", "write file", "save file", "create folder",
+            "move file", "copy file", "write to", "save to",
+        ]
+        desktop_sensitive_confirm = [
+            "type password", "enter password", "paste password", "close all",
+            "close every", "send report", "open bank", "open payment",
+            "create file", "write file", "save file", "create folder",
+            "move file", "copy file", "write to", "save to",
+        ]
+        desktop_sensitive_danger = [
+            "delete file", "delete folder", "rm -rf", "format drive",
+            "remove all", "close all windows",
+        ]
 
-        requires_approval = any(keyword in message_lower for keyword in destructive_keywords)
-        if task_type == "desktop" and any(keyword in message_lower for keyword in desktop_sensitive):
-            requires_approval = True
+        safety_level = "safe"
+        reason = ""
 
-        if requires_approval:
-            return ApprovalRequest(
-                required=True,
-                approval_level="confirm",
-                reason="The request includes a destructive or externally committed action.",
-            )
+        if any(keyword in message_lower for keyword in dangerous_keywords):
+            safety_level = "dangerous"
+            reason = "The request would modify, delete, purchase, or permanently change something on your behalf."
+        elif any(keyword in message_lower for keyword in confirm_keywords):
+            safety_level = "confirm"
+            reason = "The request appears to commit an external action or change personal data."
 
-        return ApprovalRequest(required=False, approval_level="none", reason="")
+        if task_type == "desktop":
+            if any(keyword in message_lower for keyword in desktop_sensitive_danger):
+                safety_level = "dangerous"
+                reason = "The desktop action could close, delete, or alter important user data."
+            elif safety_level == "safe" and any(keyword in message_lower for keyword in desktop_sensitive_confirm):
+                safety_level = "confirm"
+                reason = "The desktop action touches sensitive personal workflows and should be confirmed first."
+            if any(keyword in message_lower for keyword in ("create file", "write file", "save file", "write to", "save to", "create folder", "move file", "copy file")):
+                safety_level = "confirm"
+                reason = "The desktop action will create, write, move, or copy files on your machine, so I need your approval first."
+
+        requires_approval = safety_level != "safe"
+        return ApprovalRequest(
+            required=requires_approval,
+            approval_level="confirm" if requires_approval else "none",
+            reason=reason,
+            safety_level=safety_level,  # type: ignore[arg-type]
+        )
 
     def _build_task_analysis(
         self,
@@ -1628,9 +1700,9 @@ EXPLANATION: Brief description""",
             blocked_reason = access_reason
 
         risk_level = "low"
-        if approval.required:
+        if approval.safety_level == "dangerous":
             risk_level = "high"
-        elif task_type in {"desktop", "email", "calendar", "web_autonomous"}:
+        elif approval.required or task_type in {"desktop", "email", "calendar", "web_autonomous"}:
             risk_level = "medium"
 
         return TaskAnalysis(
@@ -1656,13 +1728,37 @@ EXPLANATION: Brief description""",
         message_lower = user_message.lower()
         return any(keyword in message_lower for keyword in research_keywords)
 
+    def _desktop_executor_handles_approval(self, user_message: str, task_type: str) -> bool:
+        """Let the desktop executor resolve exact paths before asking for approval."""
+        if task_type != "desktop":
+            return False
+        message_lower = user_message.lower()
+        return any(
+            phrase in message_lower
+            for phrase in [
+                "create file",
+                "write file",
+                "save file",
+                "write to",
+                "save to",
+                "create folder",
+                "move file",
+                "copy file",
+            ]
+        )
+
     def _build_execution_plan(
         self,
         envelope: TaskEnvelope,
         analysis: TaskAnalysis,
+        approval_override: bool = False,
     ) -> ExecutionPlan:
         """Create an explicit step-by-step plan before execution starts."""
         steps: List[PlanStep] = []
+        desktop_internal_approval = (
+            self._desktop_executor_handles_approval(envelope.user_message, analysis.task_type)
+            and not approval_override
+        )
 
         def _make_step(
             index: int,
@@ -1671,8 +1767,13 @@ EXPLANATION: Brief description""",
             message: str,
             depends_on: Optional[List[str]] = None,
             approval_level: str = "none",
+            safety_level: str = "safe",
+            tool_name: str = "",
             success_criteria: str = "",
             fallback_strategy: str = "",
+            verification: Optional[Dict[str, Any]] = None,
+            recovery: Optional[Dict[str, Any]] = None,
+            retry_budget: int = 0,
         ) -> PlanStep:
             return PlanStep(
                 step_id=f"step-{index}",
@@ -1681,8 +1782,59 @@ EXPLANATION: Brief description""",
                 inputs={"message": message},
                 depends_on=depends_on or [],
                 approval_level=approval_level,  # type: ignore[arg-type]
+                safety_level=safety_level,  # type: ignore[arg-type]
+                tool_name=tool_name,
+                verification=verification or {},
+                recovery=recovery or {},
+                retry_budget=retry_budget,
                 success_criteria=success_criteria,
                 fallback_strategy=fallback_strategy,
+            )
+
+        workflow_match = workflow_library_service.match_workflow(
+            envelope.user_message,
+            envelope.user_id,
+        )
+        if workflow_match and workflow_match.get("steps"):
+            workflow_steps = [step.model_copy(deep=True) for step in workflow_match["steps"]]
+            if approval_override:
+                for workflow_step in workflow_steps:
+                    workflow_step.approval_level = "none"
+                    if workflow_step.safety_level == "confirm":
+                        workflow_step.safety_level = "safe"
+            if analysis.approval.required and not any(step.approval_level != "none" for step in workflow_steps):
+                workflow_steps[0].approval_level = analysis.approval.approval_level
+                workflow_steps[0].safety_level = analysis.approval.safety_level
+
+            affected_steps = [
+                step.step_id for step in workflow_steps if step.approval_level != "none"
+            ]
+            requires_approval = bool(affected_steps) or analysis.approval.required
+            approval_request = ApprovalRequest(
+                required=requires_approval,
+                approval_level="confirm" if requires_approval else "none",
+                reason=analysis.approval.reason or (
+                    "The workflow contains confirmation-gated steps."
+                    if affected_steps else ""
+                ),
+                affected_steps=affected_steps or (
+                    [workflow_steps[0].step_id] if requires_approval else []
+                ),
+                safety_level=analysis.approval.safety_level if analysis.approval.required else (
+                    "confirm" if affected_steps else "safe"
+                ),
+            )
+            return ExecutionPlan(
+                plan_id=str(uuid.uuid4()),
+                task_type=analysis.task_type,  # type: ignore[arg-type]
+                summary=workflow_match.get("summary") or f"Run the {analysis.task_type} workflow.",
+                steps=workflow_steps,
+                requires_approval=requires_approval,
+                approval_request=approval_request if requires_approval else None,
+                workflow_key=workflow_match.get("workflow_key"),
+                workflow_name=workflow_match.get("workflow_name"),
+                workflow_source=workflow_match.get("workflow_source", "builtin"),
+                metadata=workflow_match.get("metadata") or {},
             )
 
         if not analysis.blocked:
@@ -1693,8 +1845,16 @@ EXPLANATION: Brief description""",
                     "Research the requested implementation on the web before coding.",
                     f"Research documentation and implementation guidance for: {envelope.user_message}",
                     approval_level="none",
+                    safety_level="safe",
                     success_criteria="Relevant references or findings are gathered.",
                     fallback_strategy="Proceed with implementation using existing context if research is unavailable.",
+                    verification={
+                        "method": "none",
+                        "description": "Research is verified by the presence of relevant findings in the output.",
+                    },
+                    recovery={
+                        "strategy": "Fallback to coding with current repo context if web research is unavailable.",
+                    },
                 ))
                 steps.append(_make_step(
                     2,
@@ -1703,21 +1863,63 @@ EXPLANATION: Brief description""",
                     envelope.user_message,
                     depends_on=["step-1"],
                     approval_level=analysis.approval.approval_level if analysis.approval.required else "none",
+                    safety_level=analysis.approval.safety_level if analysis.approval.required else "safe",
                     success_criteria="Code, files, and execution artifacts are produced.",
                     fallback_strategy="Return a concrete blocking error with partial output if implementation fails.",
+                    verification={
+                        "method": "none",
+                        "description": "Implementation is verified by produced files or a concrete output.",
+                    },
+                    recovery={
+                        "strategy": "Surface the blocking implementation error and preserve partial output.",
+                    },
                 ))
             else:
+                verification = {
+                    "method": "none",
+                    "description": "The specialist should either complete the task or return a clear failure reason.",
+                }
+                recovery = {
+                    "strategy": "Escalate to the general agent with failure context if the specialist cannot complete the task.",
+                }
+                retry_budget = 0
+                if analysis.task_type == "desktop":
+                    verification = {
+                        "method": "composite",
+                        "target": envelope.user_message,
+                        "description": "Desktop requests should be verified through observed state, evidence, and recovery.",
+                    }
+                    recovery = {
+                        "strategy": "Analyze, plan, execute, verify, and recover using the desktop executor.",
+                        "alternate_tools": ["list_windows", "get_active_window", "read_screen_text", "search_system"],
+                        "max_retries": 1,
+                    }
+                    retry_budget = 1
                 steps.append(_make_step(
                     1,
                     analysis.task_type,
                     f"Execute the user's {analysis.task_type.replace('_', ' ')} request.",
                     envelope.user_message,
-                    approval_level=analysis.approval.approval_level if analysis.approval.required else "none",
+                    approval_level=(
+                        "none"
+                        if desktop_internal_approval
+                        else analysis.approval.approval_level if analysis.approval.required else "none"
+                    ),
+                    safety_level=(
+                        "safe"
+                        if desktop_internal_approval
+                        else analysis.approval.safety_level if analysis.approval.required else "safe"
+                    ),
                     success_criteria="The specialist completes the request or returns a clear blocking error.",
                     fallback_strategy="Escalate to the general agent with the failure context if needed.",
+                    verification=verification,
+                    recovery=recovery,
+                    retry_budget=retry_budget,
                 ))
 
-        if analysis.approval.required:
+        requires_approval = analysis.approval.required and not desktop_internal_approval
+
+        if requires_approval:
             analysis.approval.affected_steps = [
                 step.step_id for step in steps if step.approval_level != "none"
             ]
@@ -1727,8 +1929,10 @@ EXPLANATION: Brief description""",
             task_type=analysis.task_type,  # type: ignore[arg-type]
             summary=f"Analyze the request, then execute it through the {analysis.task_type} specialist flow.",
             steps=steps,
-            requires_approval=analysis.approval.required,
-            approval_request=analysis.approval,
+            requires_approval=requires_approval,
+            approval_request=analysis.approval if requires_approval else None,
+            workflow_source="dynamic",
+            metadata={"desktop_internal_approval": desktop_internal_approval},
         )
 
     def _extract_artifacts(self, state: AgentState) -> Dict[str, Any]:
@@ -1751,11 +1955,21 @@ EXPLANATION: Brief description""",
             'web_current_url': state.get('web_current_url', ''),
             'desktop_action': state.get('desktop_action', ''),
             'desktop_result': state.get('desktop_result', {}),
+            'desktop_plan': safe_metadata.get('desktop_plan', {}),
+            'desktop_execution_trace': safe_metadata.get('desktop_execution_trace', []),
+            'desktop_evidence': safe_metadata.get('desktop_evidence', []),
+            'workflow_key': safe_metadata.get('workflow_key', ''),
+            'workflow_name': safe_metadata.get('workflow_name', ''),
+            'workflow_source': safe_metadata.get('workflow_source', ''),
         }
 
     async def _execute_plan_step(self, step: PlanStep, state: AgentState) -> AgentState:
         """Dispatch a single plan step to the correct specialist node."""
         step_message = step.inputs.get("message", state.get('user_message', ''))
+        state['metadata'] = {
+            **state.get('metadata', {}),
+            '_current_step': step.model_dump(),
+        }
         state['user_message'] = step_message
         state['task_type'] = step.agent_type
 
@@ -1795,12 +2009,19 @@ EXPLANATION: Brief description""",
         state: AgentState,
         plan: ExecutionPlan,
         message_callback: Optional[Callable] = None,
-    ) -> tuple[AgentState, List[ExecutionTraceEvent], Dict[str, Any]]:
+    ) -> tuple[AgentState, List[ExecutionTraceEvent], Dict[str, Any], Dict[str, Any]]:
         """Run the explicit plan, capturing step traces and orchestrator-managed handoffs."""
         execution_trace: List[ExecutionTraceEvent] = []
         approval_state = {"status": "not_required", "reason": ""}
+        clarification_state = {"status": "not_required", "reason": "", "options": []}
         completed_steps: set[str] = set()
         step_index = 0
+        state['metadata'] = {
+            **state.get('metadata', {}),
+            'workflow_key': plan.workflow_key or '',
+            'workflow_name': plan.workflow_name or '',
+            'workflow_source': plan.workflow_source,
+        }
 
         while step_index < len(plan.steps):
             step = plan.steps[step_index]
@@ -1814,6 +2035,8 @@ EXPLANATION: Brief description""",
                     "status": "required",
                     "reason": plan.approval_request.reason if plan.approval_request else "Approval required.",
                     "affected_steps": plan.approval_request.affected_steps if plan.approval_request else [step.step_id],
+                    "safety_level": step.safety_level,
+                    "workflow_name": plan.workflow_name,
                 }
                 execution_trace.append(ExecutionTraceEvent(
                     event_type="approval_required",
@@ -1854,7 +2077,23 @@ EXPLANATION: Brief description""",
             )
 
             state = await self._execute_plan_step(step, state)
-            step.status = "completed" if state.get('success') else "failed"
+            specialist_trace_events = state.get('metadata', {}).pop('_specialist_trace_events', [])
+            for specialist_event in specialist_trace_events:
+                if isinstance(specialist_event, ExecutionTraceEvent):
+                    execution_trace.append(specialist_event)
+                elif isinstance(specialist_event, dict):
+                    execution_trace.append(ExecutionTraceEvent(**specialist_event))
+
+            specialist_approval_state = state.get('metadata', {}).pop('_approval_state', {}) or {}
+            specialist_clarification_state = state.get('metadata', {}).pop('_clarification_state', {}) or {}
+            if specialist_clarification_state.get("status") == "required":
+                step.status = "blocked"
+                clarification_state = specialist_clarification_state
+            elif specialist_approval_state.get("status") == "required":
+                step.status = "blocked"
+                approval_state = specialist_approval_state
+            else:
+                step.status = "completed" if state.get('success') else "failed"
 
             artifacts = self._extract_artifacts(state)
             execution_trace.append(ExecutionTraceEvent(
@@ -1877,10 +2116,59 @@ EXPLANATION: Brief description""",
                 step=step.model_dump(),
             )
 
+            if clarification_state.get("status") == "required":
+                execution_trace.append(ExecutionTraceEvent(
+                    event_type="clarification_required",
+                    phase="execution",
+                    step_id=step.step_id,
+                    agent_type=step.agent_type,
+                    success=False,
+                    message=clarification_state.get("reason", clarification_state.get("question", "Clarification required.")),
+                    data={"clarification_state": clarification_state},
+                ))
+                await self._emit_progress(
+                    message_callback,
+                    "clarification_required",
+                    clarification_state.get("question", clarification_state.get("reason", "Clarification required.")),
+                    step_id=step.step_id,
+                    agent_type=step.agent_type,
+                    clarification_state=clarification_state,
+                )
+                break
+
+            if approval_state.get("status") == "required":
+                execution_trace.append(ExecutionTraceEvent(
+                    event_type="approval_required",
+                    phase="execution",
+                    step_id=step.step_id,
+                    agent_type=step.agent_type,
+                    success=False,
+                    message=approval_state["reason"],
+                    data={"approval_state": approval_state},
+                ))
+                await self._emit_progress(
+                    message_callback,
+                    "approval_required",
+                    approval_state["reason"],
+                    step_id=step.step_id,
+                    agent_type=step.agent_type,
+                    approval_state=approval_state,
+                )
+                break
+
             if not state.get('success', False):
                 break
 
             completed_steps.add(step.step_id)
+            state.get('metadata', {}).pop('_current_step', None)
+            state['conversation_history'] = (
+                state.get('conversation_history', [])
+                + [{'role': 'user', 'content': step.inputs.get("message", '')}]
+                + (
+                    [{'role': 'assistant', 'content': state.get('current_output', '')}]
+                    if state.get('current_output') else []
+                )
+            )[-20:]
 
             # Allow specialists to request another specialist through the orchestrator.
             state['metadata'].pop('_cross_agent_done', None)
@@ -1920,7 +2208,7 @@ EXPLANATION: Brief description""",
 
             step_index += 1
 
-        return state, execution_trace, approval_state
+        return state, execution_trace, approval_state, clarification_state
 
     async def _persist_interaction(
         self,
@@ -1930,15 +2218,20 @@ EXPLANATION: Brief description""",
         agent_path: List[str],
         success: bool,
         execution_trace: List[ExecutionTraceEvent],
+        plan: Optional[ExecutionPlan] = None,
+        artifacts: Optional[Dict[str, Any]] = None,
+        approval_state: Optional[Dict[str, Any]] = None,
+        clarification_state: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Persist the user request and assistant response once per orchestrated turn."""
         try:
             trace_payload = [event.model_dump() for event in execution_trace]
+            interaction_user_message = envelope.metadata.get('interaction_user_message', envelope.user_message)
             self.memory_service.save_message(
                 conversation_id=envelope.conversation_id,
                 user_id=envelope.user_id,
                 role='user',
-                content=envelope.user_message,
+                content=interaction_user_message,
                 metadata={'channel': envelope.channel},
             )
             self.memory_service.save_message(
@@ -1951,12 +2244,16 @@ EXPLANATION: Brief description""",
                     'agent_path': agent_path,
                     'success': success,
                     'execution_trace': trace_payload,
+                    'plan': plan.model_dump() if plan else None,
+                    'artifacts': artifacts or {},
+                    'approval_state': approval_state or {},
+                    'clarification_state': clarification_state or {},
                 },
             )
             self.memory_service.save_conversation_exchange(
                 conversation_id=envelope.conversation_id,
                 user_id=envelope.user_id,
-                user_message=envelope.user_message,
+                user_message=interaction_user_message,
                 assistant_response=response_text,
                 metadata={'task_type': task_type},
             )
@@ -1965,14 +2262,176 @@ EXPLANATION: Brief description""",
                 {
                     'conversation_id': envelope.conversation_id,
                     'task_type': task_type,
-                    'description': envelope.user_message,
+                    'description': interaction_user_message,
                     'agent_used': 'planner_executor',
                     'iterations': len([event for event in execution_trace if event.event_type == 'step_completed']),
                     'success': success,
                 }
             )
+            if plan and plan.workflow_key and (approval_state or {}).get('status') != 'required' and (clarification_state or {}).get('status') != 'required':
+                self.memory_service.record_workflow_run(
+                    envelope.user_id,
+                    plan.workflow_key,
+                    plan.workflow_name or plan.summary,
+                    success=success,
+                    parameters=plan.metadata,
+                    description=plan.summary,
+                    is_builtin=plan.workflow_source in {'builtin', 'heuristic'},
+                )
         except Exception as exc:
             logger.error(f"❌ Unified persistence error: {exc}")
+
+    def _format_clarification_prompt(self, clarification_state: Dict[str, Any]) -> str:
+        question = clarification_state.get("question") or clarification_state.get("reason") or "Clarification required."
+        options = clarification_state.get("options") or []
+        if not options or "\n" in question:
+            return question
+        lines = [question]
+        for option in options[:5]:
+            lines.append(f"{option.get('index')}. {option.get('path') or option.get('label')}")
+        return "\n".join(lines)
+
+    async def _build_clarification_response(
+        self,
+        *,
+        envelope: TaskEnvelope,
+        clarification_state: Dict[str, Any],
+        message_callback: Optional[Callable],
+        prompt_prefix: str = "",
+    ) -> Dict[str, Any]:
+        prompt = self._format_clarification_prompt(clarification_state)
+        output = f"{prompt_prefix}\n\n{prompt}".strip() if prompt_prefix else prompt
+        execution_trace = [
+            ExecutionTraceEvent(
+                event_type="clarification_required",
+                phase="analysis",
+                message=clarification_state.get("reason", clarification_state.get("question", "Clarification required.")),
+                agent_type=clarification_state.get("task_type", "desktop"),
+                success=False,
+                data={"clarification_state": clarification_state},
+            )
+        ]
+        response = {
+            'success': False,
+            'output': output,
+            'task_type': clarification_state.get("task_type", "desktop"),
+            'confidence': 1.0,
+            'agent_path': ['clarification_pending'],
+            'code': None,
+            'files': None,
+            'language': None,
+            'file_path': '',
+            'project_structure': None,
+            'main_file': None,
+            'project_type': '',
+            'server_running': False,
+            'server_url': '',
+            'server_port': None,
+            'plan': None,
+            'execution_trace': [event.model_dump() for event in execution_trace],
+            'approval_state': {'status': 'not_required', 'reason': '', 'affected_steps': []},
+            'clarification_state': clarification_state,
+            'artifacts': {},
+            'metadata': {
+                'channel': envelope.channel,
+                'routing_reason': 'Waiting for the user to disambiguate an exact folder or file target.',
+                'risk_level': 'medium',
+                'iterations': 0,
+                'errors': [],
+            },
+        }
+        await self._persist_interaction(
+            envelope=envelope,
+            response_text=output,
+            task_type=response['task_type'],
+            agent_path=response['agent_path'],
+            success=False,
+            execution_trace=execution_trace,
+            plan=None,
+            artifacts={},
+            approval_state=response['approval_state'],
+            clarification_state=clarification_state,
+        )
+        await self._emit_progress(
+            message_callback,
+            "final",
+            output[:500],
+            result=response,
+        )
+        return response
+
+    async def _maybe_resume_pending_clarification(
+        self,
+        *,
+        user_message: str,
+        user_id: str,
+        conversation_id: str,
+        max_iterations: int,
+        message_callback: Optional[Callable],
+        approval_override: bool,
+    ) -> Optional[Dict[str, Any]]:
+        from app.services.clarification_service import clarification_service
+
+        pending = clarification_service.get_pending_request(
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )
+        if not pending:
+            return None
+
+        envelope = TaskEnvelope(
+            user_message=user_message,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            channel=self._detect_channel(user_id),
+            metadata={"clarification_for": pending.user_message},
+        )
+
+        selected_option = clarification_service.parse_response(pending, user_message)
+        clarification_state = {
+            "status": "required",
+            "reason": pending.question,
+            "question": pending.question,
+            "options": pending.options,
+            "clarification_id": pending.clarification_id,
+            "original_request": pending.user_message,
+            "task_type": pending.task_type,
+        }
+        if not selected_option:
+            return await self._build_clarification_response(
+                envelope=envelope,
+                clarification_state=clarification_state,
+                message_callback=message_callback,
+                prompt_prefix="I still need you to choose one of the exact matches before I continue.",
+            )
+
+        clarification_service.resolve(
+            pending.clarification_id,
+            selected_option=selected_option,
+        )
+        clarification_service.remove(pending.clarification_id)
+
+        resume_context = {
+            **(pending.metadata.get("resume_context") or {}),
+            "selected_option": selected_option,
+            "selected_path": selected_option.get("value") or selected_option.get("path"),
+        }
+        await self._emit_progress(
+            message_callback,
+            "clarification_resolved",
+            f"Using {resume_context.get('selected_path', 'the selected path')}.",
+            clarification_state={**clarification_state, "status": "resolved", "selected_option": selected_option},
+        )
+        return await self.process(
+            user_message=pending.user_message,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            max_iterations=max_iterations,
+            message_callback=message_callback,
+            approval_override=approval_override,
+            resume_context=resume_context,
+            interaction_user_message=user_message,
+        )
 
     # ===== PUBLIC INTERFACE =====
     
@@ -1986,9 +2445,23 @@ EXPLANATION: Brief description""",
         max_iterations: int = 3,
         message_callback: Optional[Callable] = None,
         approval_override: bool = False,
+        resume_context: Optional[Dict[str, Any]] = None,
+        interaction_user_message: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Process a request through the unified planner/executor architecture."""
         logger.info(f"🚀 Processing: '{user_message[:50]}...'")
+
+        if not resume_context:
+            clarification_result = await self._maybe_resume_pending_clarification(
+                user_message=user_message,
+                user_id=user_id,
+                conversation_id=conversation_id,
+                max_iterations=max_iterations,
+                message_callback=message_callback,
+                approval_override=approval_override,
+            )
+            if clarification_result is not None:
+                return clarification_result
 
         state = self._build_initial_state(
             user_message=user_message,
@@ -1998,11 +2471,13 @@ EXPLANATION: Brief description""",
             message_callback=message_callback,
         )
         state['metadata']['approval_override'] = approval_override
+        state['metadata']['_resume_context'] = resume_context or {}
         envelope = TaskEnvelope(
             user_message=user_message,
             user_id=user_id,
             conversation_id=conversation_id,
             channel=self._detect_channel(user_id),
+            metadata={"interaction_user_message": interaction_user_message or user_message},
         )
 
         try:
@@ -2023,7 +2498,11 @@ EXPLANATION: Brief description""",
             state['confidence'] = analysis.confidence
             state['routing_reason'] = analysis.reasoning
 
-            plan = self._build_execution_plan(envelope, analysis)
+            plan = self._build_execution_plan(
+                envelope,
+                analysis,
+                approval_override=approval_override,
+            )
             await self._emit_progress(
                 message_callback,
                 "plan_ready",
@@ -2049,17 +2528,39 @@ EXPLANATION: Brief description""",
                 "reason": "",
                 "affected_steps": [],
             }
+            clarification_state = {
+                "status": "not_required",
+                "reason": "",
+                "options": [],
+            }
 
             if analysis.blocked:
                 state['success'] = False
                 state['final_output'] = analysis.blocked_reason
             else:
-                state, execution_events, approval_state = await self._execute_plan(
+                state, execution_events, approval_state, clarification_state = await self._execute_plan(
                     state,
                     plan,
                     message_callback=message_callback,
                 )
                 execution_trace.extend(execution_events)
+
+                web_sensitive = state.get('metadata', {}).get('web_sensitive_blocked')
+                if web_sensitive and approval_state.get("status") != "required":
+                    approval_state = {
+                        "status": "required",
+                        "reason": state['metadata'].get(
+                            'approval_reason',
+                            "The browser encountered a sensitive page and needs your approval to continue.",
+                        ),
+                        "affected_steps": [s.step_id for s in plan.steps if s.agent_type == "web_autonomous"],
+                        "safety_level": "confirm",
+                        "resume_context": {
+                            "original_message": user_message,
+                            "task_type": "web_autonomous",
+                            "live_browser": True,
+                        },
+                    }
 
                 if approval_state["status"] == "required":
                     from app.services.approval_service import approval_service
@@ -2067,11 +2568,16 @@ EXPLANATION: Brief description""",
                     approval_request = approval_service.create_request(
                         user_id=envelope.user_id,
                         conversation_id=envelope.conversation_id,
-                        user_message=envelope.user_message,
+                        user_message=user_message,
                         reason=approval_state["reason"],
                         channel=envelope.channel,
                         affected_steps=approval_state.get("affected_steps", []),
                         task_type=analysis.task_type,
+                        metadata={
+                            "safety_level": approval_state.get("safety_level"),
+                            "workflow_name": approval_state.get("workflow_name"),
+                            "resume_context": approval_state.get("resume_context") or resume_context or {},
+                        },
                     )
                     approval_state["approval_id"] = approval_request.approval_id
                     state['success'] = False
@@ -2079,6 +2585,24 @@ EXPLANATION: Brief description""",
                         "Approval is required before I continue.\n\n"
                         f"Reason: {approval_state['reason']}"
                     )
+                elif clarification_state["status"] == "required":
+                    from app.services.clarification_service import clarification_service
+
+                    clarification_request = clarification_service.create_request(
+                        user_id=envelope.user_id,
+                        conversation_id=envelope.conversation_id,
+                        user_message=user_message,
+                        question=clarification_state.get("question") or clarification_state.get("reason", "Clarification required."),
+                        options=clarification_state.get("options", []),
+                        channel=envelope.channel,
+                        task_type=analysis.task_type,
+                        metadata={
+                            "resume_context": clarification_state.get("resume_context") or {},
+                        },
+                    )
+                    clarification_state["clarification_id"] = clarification_request.clarification_id
+                    state['success'] = False
+                    state['final_output'] = self._format_clarification_prompt(clarification_state)
                 else:
                     state['final_output'] = state.get('final_output') or state.get('current_output', '')
 
@@ -2108,6 +2632,7 @@ EXPLANATION: Brief description""",
                 'plan': plan.model_dump(),
                 'execution_trace': [event.model_dump() for event in execution_trace],
                 'approval_state': approval_state,
+                'clarification_state': clarification_state,
                 'artifacts': artifacts,
                 'metadata': {
                     'channel': envelope.channel,
@@ -2129,6 +2654,10 @@ EXPLANATION: Brief description""",
                 agent_path=response['agent_path'],
                 success=response['success'],
                 execution_trace=execution_trace,
+                plan=plan,
+                artifacts=artifacts,
+                approval_state=approval_state,
+                clarification_state=clarification_state,
             )
             await self._emit_progress(
                 message_callback,
@@ -2151,6 +2680,7 @@ EXPLANATION: Brief description""",
                 'plan': None,
                 'execution_trace': [],
                 'approval_state': {'status': 'not_required', 'reason': '', 'affected_steps': []},
+                'clarification_state': {'status': 'not_required', 'reason': '', 'options': []},
                 'artifacts': {},
                 'metadata': {'error': str(e)},
             }

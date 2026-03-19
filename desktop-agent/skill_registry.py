@@ -5,6 +5,7 @@ The Orchestrator uses this to know what tools are available.
 from typing import Dict, Any, List, Optional
 from loguru import logger
 from agents.base_agent import BaseAgent
+from tool_contract import normalize_tool_response
 
 
 class SkillRegistry:
@@ -56,23 +57,27 @@ class SkillRegistry:
         """Execute a tool by name — dispatches to the owning agent"""
         agent = self.get_agent_for_tool(tool_name)
         if not agent:
-            return {
+            return normalize_tool_response(tool_name, {
                 "success": False,
                 "result": None,
                 "error": f"Unknown tool: {tool_name}. Available: {list(self._tool_map.keys())}",
-            }
+                "error_code": "unknown_tool",
+                "retryable": False,
+            })
 
         try:
             logger.info(f"Executing {tool_name} via {agent.name}")
             result = agent.execute(tool_name, args)
-            return result
+            return normalize_tool_response(tool_name, result)
         except Exception as e:
             logger.error(f"Tool execution error [{tool_name}]: {e}")
-            return {
+            return normalize_tool_response(tool_name, {
                 "success": False,
                 "result": None,
                 "error": f"Execution failed: {str(e)}",
-            }
+                "error_code": "execution_failed",
+                "retryable": True,
+            })
 
     def list_agents(self) -> List[Dict[str, Any]]:
         """List all registered agents and their tools"""

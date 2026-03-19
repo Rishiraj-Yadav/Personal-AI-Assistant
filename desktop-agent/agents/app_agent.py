@@ -4,10 +4,18 @@ App Agent — Launch, close, and discover applications
 import os
 import subprocess
 import shutil
-import glob
+import time
+import json
+from urllib.parse import urlparse
 from typing import Dict, Any, List
 from loguru import logger
 from agents.base_agent import BaseAgent
+
+try:
+    import psutil
+    HAS_PSUTIL = True
+except ImportError:
+    HAS_PSUTIL = False
 
 
 class AppAgent(BaseAgent):
@@ -98,6 +106,9 @@ class AppAgent(BaseAgent):
             self._app_cache["visual studio code"] = code_path
 
         logger.info(f"📱 App cache: {len(self._app_cache)} apps discovered")
+
+    def _normalize_app_name(self, name: str) -> str:
+        return name.lower().strip().replace(".exe", "")
 
     def _find_app(self, name: str) -> str | None:
         """Find an application by fuzzy name matching"""
@@ -195,40 +206,76 @@ class AppAgent(BaseAgent):
     def _open_app(self, name: str) -> Dict[str, Any]:
         """Open an application, folder, or URL"""
         if not name:
-            return self._error("No application name provided")
+            return self._error("No application name provided", error_code="validation_failed")
 
         # Check if it's a URL
         if name.startswith(("http://", "https://", "www.")):
             try:
                 os.startfile(name)
+                time.sleep(1.0)
+                verification = self._verify_open_target(name, "url")
+                if not verification["verified"]:
+                    return self._error(
+                        f"Opened the URL command but could not verify browser launch for {name}",
+                        error_code="verification_failed",
+                        retryable=True,
+                        observed_state=verification["observed_state"],
+                        evidence=verification["evidence"],
+                    )
                 return self._success(
                     {"opened": name, "type": "url"},
                     f"Opened URL: {name}",
+                    observed_state=verification["observed_state"],
+                    evidence=verification["evidence"],
                 )
             except Exception as e:
-                return self._error(f"Failed to open URL: {e}")
+                return self._error(f"Failed to open URL: {e}", retryable=True)
 
         # Check if it's a folder path
         if os.path.isdir(name):
             try:
-                os.startfile(name)
+                normalized_path = os.path.normpath(name)
+                try:
+                    subprocess.Popen(
+                        ["explorer.exe", normalized_path],
+                        shell=False,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                except Exception:
+                    os.startfile(normalized_path)
+                time.sleep(1.0)
+                verification = self._verify_open_target(normalized_path, "folder")
+                if not verification["verified"]:
+                    return self._error(
+                        f"Opened Explorer for {normalized_path}, but could not verify that Explorer navigated to that folder.",
+                        error_code="verification_failed",
+                        retryable=True,
+                        observed_state=verification["observed_state"],
+                        evidence=verification["evidence"],
+                    )
                 return self._success(
-                    {"opened": name, "type": "folder"},
-                    f"Opened folder: {name}",
+                    {"opened": normalized_path, "type": "folder"},
+                    f"Opened folder: {normalized_path}",
+                    observed_state=verification["observed_state"],
+                    evidence=verification["evidence"],
                 )
             except Exception as e:
-                return self._error(f"Failed to open folder: {e}")
+                return self._error(f"Failed to open folder: {e}", retryable=True)
 
         # Check if it's a file path
         if os.path.isfile(name):
             try:
                 os.startfile(name)
+                time.sleep(0.5)
                 return self._success(
                     {"opened": name, "type": "file"},
                     f"Opened file: {name}",
+                    observed_state={"path": name, "exists": os.path.isfile(name)},
+                    evidence=[{"type": "path", "path": name}],
                 )
             except Exception as e:
-                return self._error(f"Failed to open file: {e}")
+                return self._error(f"Failed to open file: {e}", retryable=True)
 
         # Find and launch application
         app_path = self._find_app(name)
@@ -245,24 +292,41 @@ class AppAgent(BaseAgent):
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                     )
+                time.sleep(1.0)
+                verification = self._verify_open_target(name, "application")
+                if not verification["verified"]:
+                    return self._error(
+                        f"Launched {name}, but the desktop agent could not verify that it opened.",
+                        error_code="verification_failed",
+                        retryable=True,
+                        observed_state=verification["observed_state"],
+                        evidence=verification["evidence"],
+                    )
                 return self._success(
                     {"opened": name, "path": app_path, "type": "application"},
                     f"Opened {name}",
+                    observed_state=verification["observed_state"],
+                    evidence=verification["evidence"],
                 )
             except Exception as e:
-                return self._error(f"Failed to open {name}: {e}")
+                return self._error(f"Failed to open {name}: {e}", retryable=True)
 
         # Last resort: try os.startfile with the raw name
         try:
             os.startfile(name)
+            time.sleep(1.0)
+            verification = self._verify_open_target(name, "application")
             return self._success(
                 {"opened": name, "type": "system_default"},
                 f"Opened {name} via system default handler",
+                observed_state=verification["observed_state"],
+                evidence=verification["evidence"],
             )
         except Exception:
             return self._error(
                 f"Could not find application '{name}'. "
-                f"Available apps include: {', '.join(list(self._app_cache.keys())[:20])}"
+                f"Available apps include: {', '.join(list(self._app_cache.keys())[:20])}",
+                error_code="not_found",
             )
 
     def _close_app(self, name: str) -> Dict[str, Any]:
@@ -285,60 +349,243 @@ class AppAgent(BaseAgent):
                 )
 
             if result.returncode == 0:
+                verification = self._collect_process_matches(name)
+                still_running = bool(verification)
+                if still_running:
+                    return self._error(
+                        f"Close command ran, but {name} still appears to be running.",
+                        error_code="verification_failed",
+                        retryable=True,
+                        observed_state={"requested_app": name, "still_running": True},
+                        evidence=[{"type": "process_list", "processes": verification[:10]}],
+                    )
                 return self._success(
                     {"closed": name},
                     f"Closed {name}",
+                    observed_state={"requested_app": name, "still_running": False},
                 )
             else:
-                return self._error(f"Could not close {name}: {result.stderr.strip()}")
+                return self._error(f"Could not close {name}: {result.stderr.strip()}", retryable=True)
         except Exception as e:
-            return self._error(f"Failed to close {name}: {e}")
+            return self._error(f"Failed to close {name}: {e}", retryable=True)
 
     def _list_running(self) -> Dict[str, Any]:
         """List running apps with visible windows"""
         try:
-            result = subprocess.run(
-                [
-                    "powershell",
-                    "-Command",
-                    "Get-Process | Where-Object {$_.MainWindowTitle -ne ''} | "
-                    "Select-Object ProcessName, MainWindowTitle, Id | "
-                    "Format-Table -AutoSize | Out-String -Width 200",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            apps = result.stdout.strip()
+            windows = self._collect_window_matches("")
             return self._success(
-                {"running_apps": apps},
+                {"running_apps": windows, "count": len(windows)},
                 f"Found running applications",
+                observed_state={"window_count": len(windows)},
+                evidence=[{"type": "window_list", "titles": [window.get("title", "") for window in windows[:10]]}],
             )
         except Exception as e:
-            return self._error(f"Failed to list running apps: {e}")
+            return self._error(f"Failed to list running apps: {e}", retryable=True)
 
     def _is_running(self, name: str) -> Dict[str, Any]:
         """Check if an app is running"""
         try:
+            processes = self._collect_process_matches(name)
+            is_running = bool(processes)
+            return self._success(
+                {"is_running": is_running, "processes": processes},
+                f"{name} is {'running' if is_running else 'not running'}",
+                observed_state={"requested_app": name, "is_running": is_running},
+                evidence=[{"type": "process_list", "processes": processes[:10]}],
+            )
+        except Exception as e:
+            return self._error(f"Failed to check {name}: {e}", retryable=True)
+
+    def _collect_process_matches(self, name: str) -> List[Dict[str, Any]]:
+        normalized_target = self._normalize_app_name(name)
+        matches: List[Dict[str, Any]] = []
+
+        if HAS_PSUTIL:
+            for proc in psutil.process_iter(["pid", "name", "exe"]):
+                try:
+                    proc_name = self._normalize_app_name(proc.info.get("name") or "")
+                    if not normalized_target or normalized_target in proc_name:
+                        matches.append(
+                            {
+                                "pid": proc.info.get("pid"),
+                                "name": proc.info.get("name"),
+                                "path": proc.info.get("exe"),
+                            }
+                        )
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+            return matches
+
+        result = subprocess.run(
+            [
+                "powershell",
+                "-Command",
+                (
+                    "Get-Process | Select-Object ProcessName, Id | "
+                    "ConvertTo-Json -Depth 2"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        output = (result.stdout or "").strip()
+        if not output:
+            return matches
+        import json
+
+        parsed = json.loads(output)
+        items = parsed if isinstance(parsed, list) else [parsed]
+        for item in items:
+            proc_name = self._normalize_app_name(item.get("ProcessName", ""))
+            if not normalized_target or normalized_target in proc_name:
+                matches.append(
+                    {
+                        "pid": item.get("Id"),
+                        "name": item.get("ProcessName"),
+                        "path": None,
+                    }
+                )
+        return matches
+
+    def _collect_window_matches(self, title_query: str) -> List[Dict[str, Any]]:
+        result = subprocess.run(
+            [
+                "powershell",
+                "-Command",
+                (
+                    "Get-Process | Where-Object {$_.MainWindowTitle -ne ''} | "
+                    "Select-Object ProcessName, MainWindowTitle, Id | ConvertTo-Json -Depth 2"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        output = (result.stdout or "").strip()
+        if not output:
+            return []
+        import json
+
+        parsed = json.loads(output)
+        items = parsed if isinstance(parsed, list) else [parsed]
+        normalized_query = title_query.lower().strip()
+        windows: List[Dict[str, Any]] = []
+        for item in items:
+            title = str(item.get("MainWindowTitle", "") or "")
+            if normalized_query and normalized_query not in title.lower():
+                continue
+            windows.append(
+                {
+                    "process_name": item.get("ProcessName"),
+                    "title": title,
+                    "pid": item.get("Id"),
+                }
+            )
+        return windows
+
+    def _verify_open_target(self, name: str, target_type: str) -> Dict[str, Any]:
+        requested = name.strip()
+        requested_lower = requested.lower()
+        processes = self._collect_process_matches(requested)
+        windows = self._collect_window_matches(requested)
+        evidence: List[Dict[str, Any]] = []
+
+        if processes:
+            evidence.append({"type": "process_list", "processes": processes[:10]})
+        if windows:
+            evidence.append({"type": "window_list", "windows": windows[:10]})
+
+        verified = bool(processes or windows)
+
+        if target_type == "folder":
+            normalized_requested = os.path.normpath(requested).lower()
+            folder_name = os.path.basename(normalized_requested)
+            explorer_windows = self._list_explorer_windows()
+            exact_matches = [
+                window for window in explorer_windows
+                if os.path.normpath(str(window.get("path", ""))).lower() == normalized_requested
+            ]
+            title_matches = [
+                window for window in explorer_windows
+                if folder_name and folder_name in str(window.get("title", "")).lower()
+            ]
+            if explorer_windows:
+                evidence.append({"type": "explorer_windows", "windows": explorer_windows[:10]})
+            verified = bool(exact_matches or title_matches)
+            observed_state = {
+                "requested": requested,
+                "target_type": target_type,
+                "verified": verified,
+                "folder_exists": os.path.isdir(requested),
+                "matching_explorer_paths": [window.get("path", "") for window in exact_matches],
+                "explorer_window_count": len(explorer_windows),
+            }
+            return {
+                "verified": verified,
+                "observed_state": observed_state,
+                "evidence": evidence,
+            }
+
+        if target_type == "url":
+            domain = urlparse(requested if requested.startswith(("http://", "https://")) else f"https://{requested}").netloc.lower()
+            browser_processes = []
+            for browser_name in ("chrome", "msedge", "edge", "firefox", "brave", "opera"):
+                browser_processes.extend(self._collect_process_matches(browser_name))
+            domain_windows = [window for window in self._collect_window_matches("") if domain and domain in window.get("title", "").lower()]
+            if browser_processes:
+                evidence.append({"type": "browser_processes", "processes": browser_processes[:10]})
+            if domain_windows:
+                evidence.append({"type": "browser_windows", "windows": domain_windows[:10]})
+            verified = bool(browser_processes or domain_windows)
+            processes = browser_processes or processes
+            windows = domain_windows or windows
+
+        observed_state = {
+            "requested": requested,
+            "target_type": target_type,
+            "verified": verified,
+            "process_count": len(processes),
+            "window_count": len(windows),
+        }
+        return {
+            "verified": verified,
+            "observed_state": observed_state,
+            "evidence": evidence,
+        }
+
+    def _list_explorer_windows(self) -> List[Dict[str, Any]]:
+        script = r"""
+        $items = @()
+        $shell = New-Object -ComObject Shell.Application
+        foreach ($window in $shell.Windows()) {
+            try {
+                $path = $window.Document.Folder.Self.Path
+                if ($path) {
+                    $items += [PSCustomObject]@{
+                        title = $window.LocationName
+                        path = $path
+                        location_url = $window.LocationURL
+                    }
+                }
+            } catch {}
+        }
+        $items | ConvertTo-Json -Depth 3
+        """
+        try:
             result = subprocess.run(
-                [
-                    "powershell",
-                    "-Command",
-                    f"Get-Process -Name '*{name}*' -ErrorAction SilentlyContinue | "
-                    f"Select-Object ProcessName, Id | Format-Table -AutoSize | Out-String",
-                ],
+                ["powershell", "-NoProfile", "-Command", script],
                 capture_output=True,
                 text=True,
                 timeout=10,
             )
-            output = result.stdout.strip()
-            is_running = bool(output and "ProcessName" in output)
-            return self._success(
-                {"is_running": is_running, "details": output},
-                f"{name} is {'running' if is_running else 'not running'}",
-            )
-        except Exception as e:
-            return self._error(f"Failed to check {name}: {e}")
+            output = (result.stdout or "").strip()
+            if result.returncode != 0 or not output:
+                return []
+            parsed = json.loads(output)
+            return parsed if isinstance(parsed, list) else [parsed]
+        except Exception:
+            return []
 
 
 # Global instance

@@ -139,6 +139,19 @@ function ChatInterface() {
 
     try {
       const response = await sendWithSmartAgent(inputMessage)
+      const desktopResult = response.data.metadata?.desktop_result || response.data.artifacts?.desktop_result || null
+      let fileContent = null
+      let fileContentPath = null
+      if (desktopResult?.completed_steps) {
+        for (const step of desktopResult.completed_steps) {
+          if (step.tool_name === 'read_file' && step.success && step.response?.result?.content) {
+            fileContent = step.response.result.content
+            fileContentPath = step.response.result.path || ''
+            break
+          }
+        }
+      }
+
       const assistantMessage = {
         role: 'assistant',
         content: response.data.response,
@@ -164,7 +177,10 @@ function ChatInterface() {
           plan: response.data.plan,
           execution_trace: response.data.execution_trace || [],
           approval_state: response.data.approval_state || null,
-          artifacts: response.data.artifacts || null
+          clarification_state: response.data.clarification_state || null,
+          artifacts: response.data.artifacts || null,
+          file_content: fileContent,
+          file_content_path: fileContentPath,
         }
       }
       setMessages(prev => [...prev, assistantMessage])
@@ -250,6 +266,7 @@ function ChatInterface() {
               plan: finalResult.plan,
               execution_trace: finalResult.execution_trace,
               approval_state: finalResult.approval_state,
+              clarification_state: finalResult.clarification_state,
               artifacts: finalResult.artifacts,
               web_screenshots: finalResult.web_screenshots,
               web_current_url: finalResult.web_current_url,
@@ -325,6 +342,62 @@ function ChatInterface() {
     } finally {
       setTaskApprovalPending(null)
       setIsLoading(false)
+    }
+  }
+
+  const handleClarificationSelect = async (optionValue) => {
+    if (isLoading) return
+    const userMessage = { role: 'user', content: optionValue, timestamp: new Date().toISOString() }
+    setMessages(prev => [...prev, userMessage])
+    setIsLoading(true)
+    setError(null)
+    setProgress(null)
+
+    try {
+      const response = await sendWithSmartAgent(optionValue)
+      const desktopResult = response.data.metadata?.desktop_result || response.data.artifacts?.desktop_result || null
+      let fileContent = null
+      let fileContentPath = null
+      if (desktopResult?.completed_steps) {
+        for (const step of desktopResult.completed_steps) {
+          if (step.tool_name === 'read_file' && step.success && step.response?.result?.content) {
+            fileContent = step.response.result.content
+            fileContentPath = step.response.result.path || ''
+            break
+          }
+        }
+      }
+      const assistantMessage = {
+        role: 'assistant',
+        content: response.data.response,
+        timestamp: response.data.timestamp || new Date().toISOString(),
+        metadata: {
+          task_type: response.data.task_type,
+          agent_path: response.data.agent_path,
+          plan: response.data.plan,
+          execution_trace: response.data.execution_trace || [],
+          approval_state: response.data.approval_state || null,
+          clarification_state: response.data.clarification_state || null,
+          artifacts: response.data.artifacts || null,
+          file_content: fileContent,
+          file_content_path: fileContentPath,
+        }
+      }
+      setMessages(prev => [...prev, assistantMessage])
+      if (response.data.approval_state?.status === 'required') {
+        setTaskApprovalPending({
+          approvalId: response.data.approval_state.approval_id,
+          reason: response.data.approval_state.reason || 'Approval required.',
+          affectedSteps: response.data.approval_state.affected_steps || [],
+          taskType: response.data.task_type
+        })
+      }
+      loadConversationList()
+    } catch (err) {
+      setError(err.message || 'Failed to process selection.')
+    } finally {
+      setIsLoading(false)
+      setProgress(null)
     }
   }
 
@@ -507,7 +580,7 @@ function ChatInterface() {
 
         {/* Messages */}
         <div className="chat-messages">
-          <MessageList messages={messages} isLoading={isLoading} />
+          <MessageList messages={messages} isLoading={isLoading} onClarificationSelect={handleClarificationSelect} />
           <div ref={messagesEndRef} />
         </div>
 

@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 
 ApprovalLevel = Literal["none", "confirm"]
+SafetyLevel = Literal["safe", "confirm", "dangerous"]
 AgentType = Literal[
     "coding",
     "desktop",
@@ -31,6 +32,21 @@ class ApprovalRequest(BaseModel):
     approval_level: ApprovalLevel = "none"
     reason: str = ""
     affected_steps: List[str] = Field(default_factory=list)
+    safety_level: SafetyLevel = "safe"
+
+
+class VerificationRequirement(BaseModel):
+    method: Literal["none", "process", "window", "file", "ocr", "screenshot", "browser", "composite"] = "none"
+    target: str = ""
+    expected: Dict[str, Any] = Field(default_factory=dict)
+    description: str = ""
+
+
+class RecoveryPolicy(BaseModel):
+    strategy: str = ""
+    alternate_tools: List[str] = Field(default_factory=list)
+    max_retries: int = 0
+    notes: str = ""
 
 
 class TaskAnalysis(BaseModel):
@@ -51,6 +67,11 @@ class PlanStep(BaseModel):
     inputs: Dict[str, Any] = Field(default_factory=dict)
     depends_on: List[str] = Field(default_factory=list)
     approval_level: ApprovalLevel = "none"
+    safety_level: SafetyLevel = "safe"
+    tool_name: str = ""
+    verification: VerificationRequirement = Field(default_factory=VerificationRequirement)
+    recovery: RecoveryPolicy = Field(default_factory=RecoveryPolicy)
+    retry_budget: int = 0
     success_criteria: str = ""
     fallback_strategy: str = ""
     status: Literal["pending", "running", "completed", "failed", "blocked"] = "pending"
@@ -63,6 +84,10 @@ class ExecutionPlan(BaseModel):
     steps: List[PlanStep] = Field(default_factory=list)
     requires_approval: bool = False
     approval_request: Optional[ApprovalRequest] = None
+    workflow_key: Optional[str] = None
+    workflow_name: Optional[str] = None
+    workflow_source: str = "dynamic"
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class AgentHandoff(BaseModel):

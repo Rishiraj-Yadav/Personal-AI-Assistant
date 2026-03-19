@@ -5,8 +5,9 @@ Runs on host machine (not Docker) to access the physical desktop.
 """
 from fastapi import FastAPI, HTTPException, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Dict, Any, Optional, List
+import asyncio
 import uvicorn
 from loguru import logger
 import sys
@@ -82,8 +83,15 @@ def register_all_agents():
     except Exception as e:
         logger.warning(f"Failed to load Notification Agent: {e}")
 
+    try:
+        from agents.browser_agent import browser_agent
+        registry.register_agent(browser_agent)
+        agents_loaded.append("browser")
+    except Exception as e:
+        logger.warning(f"Failed to load Browser Agent: {e}")
+
     logger.info(
-        f"✅ Loaded {len(agents_loaded)}/{8} agents: {', '.join(agents_loaded)}"
+        f"✅ Loaded {len(agents_loaded)}/{9} agents: {', '.join(agents_loaded)}"
     )
     return agents_loaded
 
@@ -135,6 +143,12 @@ class SkillExecutionResponse(BaseModel):
     result: Any
     safe_mode: bool = False
     error: Optional[str] = None
+    message: str = ""
+    error_code: Optional[str] = None
+    retryable: bool = False
+    observed_state: Dict[str, Any] = Field(default_factory=dict)
+    evidence: List[Dict[str, Any]] = Field(default_factory=list)
+    tool_name: Optional[str] = None
 
 
 # ───── Auth ─────
@@ -204,12 +218,19 @@ async def execute_skill_direct(
     Bypasses the brain — calls the skill directly.
     """
     try:
-        result = registry.execute_tool(request.skill, request.args)
+        # Run sync tools off the asyncio loop (Playwright sync API forbids running on the loop)
+        result = await asyncio.to_thread(registry.execute_tool, request.skill, request.args)
         return SkillExecutionResponse(
             success=result.get("success", False),
             result=result.get("result"),
             safe_mode=request.safe_mode or settings.SAFE_MODE,
             error=result.get("error"),
+            message=result.get("message", ""),
+            error_code=result.get("error_code"),
+            retryable=result.get("retryable", False),
+            observed_state=result.get("observed_state") or {},
+            evidence=result.get("evidence") or [],
+            tool_name=result.get("tool_name"),
         )
     except Exception as e:
         logger.error(f"Direct execution error: {e}")

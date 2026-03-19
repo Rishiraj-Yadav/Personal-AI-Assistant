@@ -306,8 +306,10 @@ class TelegramBotService:
                 meta = result.get("metadata", {}) or {}
                 screenshot_b64 = meta.get("screenshot_base64")
                 approval_state = result.get("approval_state") or {}
+                clarification_state = result.get("clarification_state") or {}
             else:
                 approval_state = {}
+                clarification_state = {}
 
             await self._send_text_response(
                 chat_id=chat_id,
@@ -315,6 +317,27 @@ class TelegramBotService:
                 reply_to_message_id=message_id,
                 thread_id=thread_id,
             )
+
+            if clarification_state.get("status") == "required":
+                options = clarification_state.get("options") or []
+                if options:
+                    rows = []
+                    for opt in options[:5]:
+                        idx = opt.get("index", 1)
+                        label = opt.get("path") or opt.get("label") or str(idx)
+                        display = label if len(label) <= 50 else f"...{label[-47:]}"
+                        rows.append([{
+                            "text": f"{idx}. {display}",
+                            "callback_data": f"clarify:{conversation_id}:{idx}",
+                        }])
+                    keyboard = {"inline_keyboard": rows}
+                    await self._send_text_response(
+                        chat_id=chat_id,
+                        text="Tap an option or reply with the number:",
+                        reply_to_message_id=message_id,
+                        thread_id=thread_id,
+                        reply_markup=keyboard,
+                    )
 
             if approval_state.get("status") == "required" and approval_state.get("approval_id"):
                 approval_id = approval_state["approval_id"]
@@ -350,11 +373,16 @@ class TelegramBotService:
             )
 
     async def _process_callback_query(self, callback_query: dict) -> None:
-        """Handle inline approval buttons for guarded actions."""
+        """Handle inline approval and clarification buttons."""
         data = callback_query.get("data") or ""
         callback_query_id = callback_query.get("id")
         message = callback_query.get("message") or {}
         callback_from = callback_query.get("from") or {}
+
+        if data.startswith("clarify:") and callback_query_id and message:
+            await self._handle_clarification_callback(callback_query, data, callback_query_id, message, callback_from)
+            return
+
         if not data.startswith("approval:") or not callback_query_id or not message:
             return
 
@@ -416,6 +444,7 @@ class TelegramBotService:
                 conversation_id=approval.conversation_id,
                 max_iterations=3,
                 approval_override=True,
+                resume_context=approval.metadata.get("resume_context") if isinstance(approval.metadata, dict) else None,
             )
             approval_service.resolve(approval_id, approved=True, result=result)
             response_text = result.get("output", "Approved action completed.")
@@ -430,6 +459,76 @@ class TelegramBotService:
             await self._send_text_response(
                 chat_id=chat_id,
                 text=f"Failed to continue approved action: {str(e)[:200]}",
+                reply_to_message_id=reply_to_message_id,
+                thread_id=thread_id,
+            )
+
+    async def _handle_clarification_callback(
+        self,
+        callback_query: dict,
+        data: str,
+        callback_query_id: str,
+        message: dict,
+        callback_from: dict,
+    ) -> None:
+        """Resume a paused task after the user picks a clarification option."""
+        try:
+            parts = data.split(":", 2)
+            if len(parts) < 3:
+                await self._answer_callback_query(callback_query_id, "Invalid selection.")
+                return
+            _, conversation_id, selection = parts
+        except Exception:
+            await self._answer_callback_query(callback_query_id, "Invalid selection.")
+            return
+
+        chat = message.get("chat", {}) or {}
+        chat_id = int(chat["id"])
+        thread_id = message.get("message_thread_id")
+        reply_to_message_id = int(message.get("message_id"))
+        user_id_numeric = callback_from.get("id") or chat_id
+        user_id = f"telegram_{user_id_numeric}"
+
+        await self._answer_callback_query(callback_query_id, f"Selected option {selection}.")
+        await self._send_typing(chat_id=chat_id, thread_id=thread_id)
+
+        try:
+            orchestrator = self._get_orchestrator()
+            result = await orchestrator.process(
+                user_message=selection,
+                user_id=user_id,
+                conversation_id=conversation_id,
+                max_iterations=3,
+            )
+            response_text = result.get("output", "Selection processed.")
+            await self._send_text_response(
+                chat_id=chat_id,
+                text=response_text,
+                reply_to_message_id=reply_to_message_id,
+                thread_id=thread_id,
+            )
+
+            new_approval_state = result.get("approval_state") or {}
+            if new_approval_state.get("status") == "required" and new_approval_state.get("approval_id"):
+                aid = new_approval_state["approval_id"]
+                keyboard = {
+                    "inline_keyboard": [[
+                        {"text": "Approve", "callback_data": f"approval:approve:{aid}"},
+                        {"text": "Deny", "callback_data": f"approval:deny:{aid}"},
+                    ]]
+                }
+                await self._send_text_response(
+                    chat_id=chat_id,
+                    text="Approve this action to continue.",
+                    reply_to_message_id=reply_to_message_id,
+                    thread_id=thread_id,
+                    reply_markup=keyboard,
+                )
+        except Exception as e:
+            logger.error(f"Telegram clarification callback error: {e}")
+            await self._send_text_response(
+                chat_id=chat_id,
+                text=f"Failed to process selection: {str(e)[:200]}",
                 reply_to_message_id=reply_to_message_id,
                 thread_id=thread_id,
             )

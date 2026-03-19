@@ -2,6 +2,7 @@
 Multi-Agent API Routes - Enhanced with LangGraph + Memory + Slash Commands
 """
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
 from loguru import logger
@@ -40,6 +41,7 @@ class MultiAgentResponse(BaseModel):
     plan: Optional[Dict[str, Any]] = None
     execution_trace: List[Dict[str, Any]] = Field(default_factory=list)
     approval_state: Optional[Dict[str, Any]] = None
+    clarification_state: Optional[Dict[str, Any]] = None
     artifacts: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
     agent_path: List[str]
@@ -94,6 +96,7 @@ async def generate_code(request: MultiAgentRequest):
             plan=result.get("plan"),
             execution_trace=result.get("execution_trace", []),
             approval_state=result.get("approval_state"),
+            clarification_state=result.get("clarification_state"),
             artifacts=result.get("artifacts"),
             error=result.get("error"),
             agent_path=result.get("agent_path", [])
@@ -164,7 +167,7 @@ async def code_generation_stream(websocket: WebSocket):
                         payload["step"] = msg_data["step"]
                     if "success" in msg_data:
                         payload["success"] = msg_data["success"]
-                await websocket.send_json(payload)
+                await websocket.send_json(jsonable_encoder(payload))
             except Exception as e:
                 logger.warning(f"⚠️ Send failed: {e}")
         
@@ -202,7 +205,7 @@ async def code_generation_stream(websocket: WebSocket):
             })
         
         # Send completion
-        await websocket.send_json({
+        await websocket.send_json(jsonable_encoder({
             "type": "complete",
             "success": result.get("success"),
             "result": {
@@ -222,13 +225,14 @@ async def code_generation_stream(websocket: WebSocket):
                 "plan": result.get("plan"),
                 "execution_trace": result.get("execution_trace", []),
                 "approval_state": result.get("approval_state"),
+                "clarification_state": result.get("clarification_state"),
                 "artifacts": result.get("artifacts"),
                 "web_screenshots": result.get("metadata", {}).get("web_screenshots", []),
                 "web_current_url": result.get("metadata", {}).get("web_current_url", ""),
                 "web_autonomous": result.get("metadata", {}).get("web_autonomous", False),
             },
             "timestamp": datetime.now(timezone.utc).isoformat()
-        })
+        }))
     
     except WebSocketDisconnect:
         logger.info("🔌 WebSocket disconnected")
@@ -327,6 +331,7 @@ async def respond_to_guarded_approval(request: ApprovalDecisionRequest):
             conversation_id=approval.conversation_id,
             max_iterations=3,
             approval_override=True,
+            resume_context=approval.metadata.get("resume_context") if isinstance(approval.metadata, dict) else None,
         )
         approval_service.resolve(request.approval_id, approved=True, result=result)
 
@@ -357,6 +362,7 @@ async def respond_to_guarded_approval(request: ApprovalDecisionRequest):
                 "status": "approved",
                 "approval_id": request.approval_id,
             },
+            clarification_state=result.get("clarification_state"),
             artifacts=result.get("artifacts"),
             error=result.get("error"),
             agent_path=result.get("agent_path", []),

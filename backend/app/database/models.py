@@ -22,6 +22,8 @@ class User(Base):
     preferences = relationship("UserPreference", back_populates="user", cascade="all, delete-orphan")
     conversations = relationship("Conversation", back_populates="user", cascade="all, delete-orphan")
     task_history = relationship("TaskHistory", back_populates="user", cascade="all, delete-orphan")
+    profile = relationship("UserProfile", back_populates="user", cascade="all, delete-orphan", uselist=False)
+    saved_workflows = relationship("SavedWorkflow", back_populates="user", cascade="all, delete-orphan")
 
 
 class UserPreference(Base):
@@ -200,3 +202,49 @@ class ScheduledJob(Base):
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     next_run = Column(DateTime, nullable=True)
+
+
+class UserProfile(Base):
+    """Structured long-lived user profile for assistant personalization."""
+    __tablename__ = 'user_profiles'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String(255), ForeignKey('users.user_id', ondelete='CASCADE'), unique=True)
+
+    preferred_browser = Column(String(100), nullable=True)
+    preferred_editor = Column(String(100), nullable=True)
+    preferred_terminal = Column(String(100), nullable=True)
+
+    favorite_apps = Column(JSON, default=list)
+    common_folders = Column(JSON, default=list)
+    common_contacts = Column(JSON, default=list)
+    named_routines = Column(JSON, default=list)
+    profile_metadata = Column("metadata", JSON, default=dict)
+
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    user = relationship("User", back_populates="profile")
+
+
+class SavedWorkflow(Base):
+    """Reusable workflows and routines for a specific user."""
+    __tablename__ = 'saved_workflows'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String(255), ForeignKey('users.user_id', ondelete='CASCADE'))
+
+    workflow_key = Column(String(255))
+    workflow_name = Column(String(255))
+    description = Column(Text, nullable=True)
+    triggers = Column(JSON, default=list)
+    parameter_defaults = Column(JSON, default=dict)
+    step_overrides = Column(JSON, default=list)
+    is_builtin = Column(Boolean, default=False)
+    use_count = Column(Integer, default=0)
+    last_used = Column(DateTime, nullable=True)
+
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    user = relationship("User", back_populates="saved_workflows")

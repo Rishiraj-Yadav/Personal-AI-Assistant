@@ -34,6 +34,7 @@ class DesktopBridgeSkill:
         self._canonical_tools_logged: Set[str] = set()
         self._required_tools = {
             "open_application",
+            "close_application",
             "mouse_click",
             "mouse_move",
             "mouse_scroll",
@@ -43,11 +44,31 @@ class DesktopBridgeSkill:
             "take_screenshot",
             "read_screen_text",
             "list_windows",
+            "get_active_window",
             "focus_window",
             "minimize_window",
             "maximize_window",
+            "search_system",
         }
         logger.info(f"DesktopBridge initialized: {self.desktop_agent_url}")
+
+    def _normalize_response(self, tool_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
+        """Ensure the backend always receives the canonical desktop action contract."""
+        if not isinstance(result, dict):
+            result = {"success": False, "result": None, "error": f"Invalid response for {tool_name}"}
+
+        canonical = {
+            "tool_name": result.get("tool_name") or tool_name,
+            "success": bool(result.get("success", False)),
+            "result": result.get("result"),
+            "message": result.get("message", ""),
+            "error": result.get("error"),
+            "error_code": result.get("error_code") or ("ok" if result.get("success") else "execution_failed"),
+            "retryable": bool(result.get("retryable", False)),
+            "observed_state": result.get("observed_state") or {},
+            "evidence": result.get("evidence") or [],
+        }
+        return canonical
 
     def _is_docker(self) -> bool:
         """Check if running inside Docker."""
@@ -163,6 +184,9 @@ class DesktopBridgeSkill:
         if skill_name == "screen_reader":
             return "read_screen_text", {}
 
+        if skill_name == "window_manager" and (normalized_args.get("action") or "").lower() == "get_active":
+            return "get_active_window", {}
+
         return skill_name, normalized_args
 
     def _extract_tool_names(self, capabilities: Dict[str, Any]) -> Set[str]:
@@ -265,32 +289,139 @@ class DesktopBridgeSkill:
                     result = await response.json()
                     logger.info("Desktop Agent response received")
                     logger.debug(f"Result: {result}")
-                    return result
+                    return self._normalize_response(canonical_skill_name, result)
 
         except aiohttp.ClientConnectorError as exc:
             logger.error(f"Cannot connect to Desktop Agent at {self.desktop_agent_url}")
             logger.error(f"Error: {str(exc)}")
             return {
+                "tool_name": canonical_skill_name,
                 "success": False,
+                "result": None,
+                "message": "",
                 "error": (
                     f"Desktop Agent not reachable at {self.desktop_agent_url}. Please ensure:\n"
                     "1. Desktop Agent is running (check desktop-agent service)\n"
                     "2. Port 7777 is accessible\n"
                     "3. Firewall allows connections"
                 ),
+                "error_code": "connection_failed",
+                "retryable": True,
+                "observed_state": {"desktop_agent_url": self.desktop_agent_url},
+                "evidence": [],
             }
 
         except asyncio.TimeoutError:
             logger.error("Desktop Agent request timeout")
             return {
+                "tool_name": canonical_skill_name,
                 "success": False,
+                "result": None,
+                "message": "",
                 "error": "Desktop Agent request timed out",
+                "error_code": "timeout",
+                "retryable": True,
+                "observed_state": {"desktop_agent_url": self.desktop_agent_url},
+                "evidence": [],
             }
 
         except Exception as exc:
             logger.error(f"Desktop bridge error: {str(exc)}")
             return {
+                "tool_name": canonical_skill_name,
                 "success": False,
+                "result": None,
+                "message": "",
+                "error": str(exc),
+                "error_code": "execution_failed",
+                "retryable": True,
+                "observed_state": {"desktop_agent_url": self.desktop_agent_url},
+                "evidence": [],
+            }
+
+    async def execute_nl_command(
+        self, command: str, timeout_seconds: int = 120
+    ) -> Dict[str, Any]:
+        """
+        Send a natural-language command to the Desktop Agent Brain (/execute-nl).
+        Used for multi-step tasks like live browser automation where the brain
+        plans and executes autonomously using its ReAct loop.
+        """
+        try:
+            long_timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+            async with aiohttp.ClientSession(timeout=long_timeout) as session:
+                headers = {
+                    "X-API-Key": self._get_api_key(),
+                    "Content-Type": "application/json",
+                }
+                payload = {"command": command}
+
+                logger.info(
+                    f"Sending NL command to Desktop Agent Brain: {command[:100]}..."
+                )
+
+                async with session.post(
+                    f"{self.desktop_agent_url}/execute-nl",
+                    json=payload,
+                    headers=headers,
+                ) as response:
+                    if response.status == 401:
+                        return {
+                            "success": False,
+                            "response": "",
+                            "actions_taken": [],
+                            "error": "Invalid API key for Desktop Agent.",
+                        }
+                    if response.status != 200:
+                        error_text = await response.text()
+                        return {
+                            "success": False,
+                            "response": "",
+                            "actions_taken": [],
+                            "error": f"Desktop Agent error ({response.status}): {error_text}",
+                        }
+
+                    result = await response.json()
+                    logger.info(
+                        f"Desktop Agent Brain responded: success={result.get('success')}, "
+                        f"actions={len(result.get('actions_taken', []))}"
+                    )
+                    return {
+                        "success": result.get("success", False),
+                        "response": result.get("response", ""),
+                        "actions_taken": result.get("actions_taken", []),
+                        "error": None,
+                    }
+
+        except asyncio.TimeoutError:
+            logger.error(
+                f"Desktop Agent NL command timed out after {timeout_seconds}s"
+            )
+            return {
+                "success": False,
+                "response": "",
+                "actions_taken": [],
+                "error": f"Desktop Agent timed out after {timeout_seconds}s",
+            }
+        except aiohttp.ClientConnectorError:
+            logger.error(
+                f"Cannot connect to Desktop Agent at {self.desktop_agent_url}"
+            )
+            return {
+                "success": False,
+                "response": "",
+                "actions_taken": [],
+                "error": (
+                    f"Desktop Agent not reachable at {self.desktop_agent_url}. "
+                    "Make sure the desktop agent is running."
+                ),
+            }
+        except Exception as exc:
+            logger.error(f"Desktop bridge NL command error: {exc}")
+            return {
+                "success": False,
+                "response": "",
+                "actions_taken": [],
                 "error": str(exc),
             }
 

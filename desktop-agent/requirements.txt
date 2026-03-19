@@ -14,6 +14,7 @@ google-generativeai>=0.8.0
 pyautogui==0.9.54
 pynput==1.7.6
 pillow==10.1.0
+pywin32>=306
 
 # === Computer Vision / OCR ===
 opencv-python==4.9.0.80
@@ -33,6 +34,9 @@ mss==9.0.1
 requests==2.31.0
 beautifulsoup4>=4.12.0
 duckduckgo-search>=6.0.0
+
+# === Live Browser Agent (Playwright) ===
+playwright>=1.40.0
 
 # === Notifications & TTS ===
 winotify>=1.1.0
