@@ -1,0 +1,113 @@
+/* Action Display Component Styles - Phase 4 */
+
+.action-display {
+  margin: 1rem 0;
+  padding: 0.75rem;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  border-radius: 12px;
+  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.15);
+}
+
+.action-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  padding: 0.75rem;
+  background: rgba(255, 255, 255, 0.95);
+  border-radius: 8px;
+  margin-bottom: 0.5rem;
+  transition: all 0.3s ease;
+}
+
+.action-item:last-child {
+  margin-bottom: 0;
+}
+
+.action-item.active {
+  background: rgba(255, 255, 255, 1);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  border-left: 3px solid #667eea;
+}
+
+.action-item.completed {
+  opacity: 0.8;
+}
+
+.action-item.failed {
+  background: rgba(255, 236, 236, 0.95);
+  border-left: 3px solid #ef4444;
+}
+
+.action-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+}
+
+.action-icon .spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid #e0e0e0;
+  border-top-color: #667eea;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.action-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.action-description {
+  font-size: 0.9rem;
+  color: #2d3748;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.action-result {
+  font-size: 0.8rem;
+  color: #718096;
+  margin-top: 0.25rem;
+  font-family: 'Monaco', 'Menlo', monospace;
+}
+
+.action-progress {
+  margin-top: 0.5rem;
+  height: 4px;
+  background: #e0e0e0;
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.action-progress-bar {
+  height: 100%;
+  background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+  transition: width 0.3s ease;
+  border-radius: 2px;
+}
+
+/* Animations */
+.action-item {
+  animation: slideIn 0.3s ease-out;
+}
+
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

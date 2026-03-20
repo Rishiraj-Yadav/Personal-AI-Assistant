@@ -275,11 +275,37 @@ async def resume(api_key: str = Depends(verify_api_key)):
     return {"success": True, "safe_mode": False}
 
 
+# ───── Backend WebSocket Connection ─────
+_ws_client = None
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize WebSocket connection to backend on startup"""
+    global _ws_client
+    backend_ws_url = os.environ.get("BACKEND_WS_URL", "ws://localhost:8000/ws/desktop")
+    
+    try:
+        from backend_client import start_ws_client
+        _ws_client = await start_ws_client(backend_ws_url)
+        logger.info(f"🔌 WebSocket client started (backend: {backend_ws_url})")
+    except Exception as e:
+        logger.warning(f"⚠️ WebSocket client not started: {e}")
+        logger.info("📡 Running in HTTP-only mode")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cleanup on shutdown"""
+    global _ws_client
+    if _ws_client:
+        await _ws_client.disconnect()
+
+
 # ───── Startup ─────
 def startup_banner():
     """Print startup banner"""
     print("\n" + "=" * 60)
-    print("🤖  DESKTOP AGENT v2 — AI Desktop Assistant")
+    print("🤖  DESKTOP AGENT v2 — AI Desktop Assistant (Phase 6)")
     print("=" * 60)
     print(f"Host: {settings.HOST}:{settings.PORT}")
     print(f"Brain: {'Gemini Flash ✓' if brain.model else '❌ NOT CONFIGURED'}")
@@ -288,6 +314,8 @@ def startup_banner():
     print(f"Safe Mode: {'ON ✓' if settings.SAFE_MODE else 'OFF ⚠️'}")
     print("=" * 60)
     print(f"API Key: {settings.API_KEY[:20]}...")
+    backend_ws = os.environ.get("BACKEND_WS_URL", "ws://localhost:8000/ws/desktop")
+    print(f"Backend WS: {backend_ws}")
     print("=" * 60)
 
     if not brain.model:

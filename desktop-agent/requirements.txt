@@ -41,6 +41,9 @@ pyttsx3>=2.90
 # === Scheduler ===
 apscheduler>=3.10.0
 
+# === WebSocket Client (Phase 6) ===
+websockets>=12.0
+
 # === Utilities ===
 python-dotenv==1.0.0
 loguru==0.7.2

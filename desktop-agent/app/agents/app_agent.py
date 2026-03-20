@@ -6,7 +6,9 @@ import subprocess
 import shutil
 import webbrowser
 import glob
-from typing import Dict, Any, List
+import time
+import psutil
+from typing import Dict, Any, List, Optional
 from loguru import logger
 from agents.base_agent import BaseAgent
 
@@ -36,6 +38,15 @@ class AppAgent(BaseAgent):
         "chatgpt": "https://chat.openai.com",
         "whatsapp": "https://web.whatsapp.com",
     }
+    
+    # Browser process names for detection
+    BROWSER_PROCESSES = {
+        "chrome": ["chrome.exe", "chrome"],
+        "firefox": ["firefox.exe", "firefox"],
+        "edge": ["msedge.exe", "msedge", "MicrosoftEdge.exe"],
+        "brave": ["brave.exe", "brave"],
+        "opera": ["opera.exe", "opera"],
+    }
 
     def __init__(self):
         super().__init__(
@@ -43,6 +54,8 @@ class AppAgent(BaseAgent):
             description="Launch, close, and discover applications, folders, and URLs. Can open websites like YouTube, Google, GitHub etc. in the system's default browser."
         )
         self._app_cache: Dict[str, str] = {}
+        self._browser_ready: bool = False
+        self._active_browser: Optional[str] = None
         self._build_app_cache()
 
     def _build_app_cache(self):
@@ -241,6 +254,57 @@ class AppAgent(BaseAgent):
                     "required": ["url"],
                 },
             },
+            {
+                "name": "open_path",
+                "description": "Open any file or folder path directly in the appropriate application (Explorer for folders, default app for files)",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "The file or folder path to open",
+                        },
+                    },
+                    "required": ["path"],
+                },
+            },
+            {
+                "name": "launch_app",
+                "description": "Launch an application by name (alias for open_application)",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "app": {
+                            "type": "string",
+                            "description": "Application name to launch",
+                        },
+                    },
+                    "required": ["app"],
+                },
+            },
+            {
+                "name": "ensure_browser",
+                "description": "Ensure the default browser is open and ready for web tasks. Call this BEFORE any web interaction tasks.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "wait_time": {
+                            "type": "number",
+                            "description": "Seconds to wait for browser to start (default: 2.0)",
+                        },
+                    },
+                    "required": [],
+                },
+            },
+            {
+                "name": "get_browser_status",
+                "description": "Check if any browser is currently running and get its name",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                },
+            },
         ]
 
     def execute(self, tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -256,6 +320,20 @@ class AppAgent(BaseAgent):
             return self._is_running(args.get("name", ""))
         elif tool_name == "open_url":
             return self._open_url(args.get("url", ""))
+        elif tool_name == "open_path":
+            return self._open_path(args.get("path", ""))
+        elif tool_name == "launch_app":
+            return self._open_app(args.get("app", ""))
+        elif tool_name == "ensure_browser":
+            result = self._ensure_browser_ready(args.get("wait_time", 2.0))
+            return self._success(result, "Browser check complete")
+        elif tool_name == "get_browser_status":
+            is_running, browser_name = self._is_browser_running()
+            return self._success({
+                "is_running": is_running,
+                "browser": browser_name,
+                "browser_ready": self._browser_ready
+            }, f"Browser {'running' if is_running else 'not running'}")
         return self._error(f"Unknown tool: {tool_name}")
 
     def _open_app(self, name: str) -> Dict[str, Any]:
@@ -351,8 +429,75 @@ class AppAgent(BaseAgent):
                 f"Available apps include: {', '.join(list(self._app_cache.keys())[:20])}"
             )
 
-    def _open_url(self, url: str) -> Dict[str, Any]:
-        """Open a URL or well-known website name in the system's default browser"""
+    def _is_browser_running(self) -> tuple[bool, Optional[str]]:
+        """Check if any known browser is currently running."""
+        for browser_name, process_names in self.BROWSER_PROCESSES.items():
+            for proc in psutil.process_iter(['name']):
+                try:
+                    if proc.info['name'] in process_names:
+                        return True, browser_name
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+        return False, None
+    
+    def _ensure_browser_ready(self, wait_time: float = 2.0) -> Dict[str, Any]:
+        """
+        Ensure the default browser is open and ready.
+        
+        This is called before web tasks that require browser interaction.
+        Returns info about the browser state.
+        """
+        is_running, browser_name = self._is_browser_running()
+        
+        if is_running:
+            self._browser_ready = True
+            self._active_browser = browser_name
+            logger.info(f"🌐 Browser already running: {browser_name}")
+            return {
+                "browser_ready": True,
+                "browser": browser_name,
+                "action": "already_running"
+            }
+        
+        # Open browser with a blank page first
+        logger.info("🌐 Opening browser...")
+        try:
+            webbrowser.open("about:blank")
+            time.sleep(wait_time)  # Wait for browser to start
+            
+            # Check if it's running now
+            is_running, browser_name = self._is_browser_running()
+            if is_running:
+                self._browser_ready = True
+                self._active_browser = browser_name
+                logger.info(f"✅ Browser started: {browser_name}")
+                return {
+                    "browser_ready": True,
+                    "browser": browser_name,
+                    "action": "started"
+                }
+            else:
+                return {
+                    "browser_ready": False,
+                    "browser": None,
+                    "action": "failed_to_start"
+                }
+        except Exception as e:
+            logger.error(f"Failed to start browser: {e}")
+            return {
+                "browser_ready": False,
+                "browser": None,
+                "error": str(e)
+            }
+
+    def _open_url(self, url: str, ensure_browser: bool = True) -> Dict[str, Any]:
+        """
+        Open a URL or well-known website name in the system's default browser.
+        
+        Args:
+            url: URL or website name (e.g., "youtube", "https://google.com")
+            ensure_browser: If True, ensures browser is ready before opening URL
+        """
         if not url:
             return self._error("No URL provided")
 
@@ -371,13 +516,72 @@ class AppAgent(BaseAgent):
             resolved_url = f"https://www.{url_lower}.com"
 
         try:
+            # Check/ensure browser is running
+            browser_info = None
+            if ensure_browser:
+                browser_info = self._ensure_browser_ready(wait_time=1.0)
+            
+            # Open the URL
             webbrowser.open(resolved_url)
+            
+            result_data = {
+                "opened": resolved_url,
+                "type": "url",
+                "original_input": url,
+                "browser_ready": self._browser_ready,
+                "active_browser": self._active_browser
+            }
+            
+            if browser_info:
+                result_data["browser_info"] = browser_info
+            
             return self._success(
-                {"opened": resolved_url, "type": "url", "original_input": url},
+                result_data,
                 f"Opened {resolved_url} in default browser",
             )
         except Exception as e:
             return self._error(f"Failed to open URL '{resolved_url}': {e}")
+
+    def _open_path(self, path: str) -> Dict[str, Any]:
+        """
+        Open a file or folder path directly.
+        
+        This is the primary method for the backend to open paths.
+        - Folders open in Windows Explorer
+        - Files open with their default application
+        """
+        if not path:
+            return self._error("No path provided")
+        
+        # Expand environment variables and user home
+        expanded = os.path.expanduser(os.path.expandvars(path))
+        
+        # Check if path exists
+        if not os.path.exists(expanded):
+            return self._error(f"Path does not exist: {expanded}")
+        
+        try:
+            if os.path.isdir(expanded):
+                # Open folder in Explorer
+                subprocess.Popen(
+                    ["explorer.exe", expanded],
+                    shell=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                return self._success(
+                    {"opened": expanded, "type": "folder", "original_path": path},
+                    f"Opened folder: {expanded}",
+                )
+            else:
+                # Open file with default application
+                os.startfile(expanded)
+                return self._success(
+                    {"opened": expanded, "type": "file", "original_path": path},
+                    f"Opened file: {expanded}",
+                )
+        except Exception as e:
+            return self._error(f"Failed to open path '{expanded}': {e}")
 
     def _open_special_folder(self, folder: str) -> Dict[str, Any]:
         key = (folder or "").strip().lower()
