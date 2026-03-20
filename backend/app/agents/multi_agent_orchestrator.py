@@ -317,6 +317,26 @@ class MultiAgentOrchestrator:
 
             # Convert conversation history to Message objects for LLM
             messages = []
+            
+            # Add system message with clear instructions for tool selection
+            messages.append(Message(
+                role=MessageRole.SYSTEM,
+                content="""You are a desktop automation assistant. Follow these rules strictly:
+
+1. **For opening folders** (Pictures, Documents, Downloads, Desktop):
+   - ALWAYS use `open_special_folder` tool with the appropriate folder parameter
+   - NEVER use open_application + type_text + press_key for this
+   - Example: For "open pictures folder" → call open_special_folder(folder="pictures")
+
+2. **For opening files at specific paths**:
+   - Use `open_path` tool with the full path
+
+3. **For launching applications**:
+   - Use `launch_app` tool with app name
+
+Choose the SIMPLEST and MOST DIRECT tool for each task."""
+            ))
+            
             for msg in conversation_history[-10:]:  # Last 10 messages
                 role = MessageRole.USER if msg['role'] == 'user' else MessageRole.ASSISTANT
                 messages.append(Message(
@@ -330,12 +350,102 @@ class MultiAgentOrchestrator:
                 content=state["user_message"]
             ))
 
-            # Get desktop response from LLM with tool calling
-            from ..skills.manager import skill_manager
-            tools = skill_manager.get_skills_for_llm()
+            # Get desktop tools from the desktop agent (not skill_manager)
+            from ..skills.desktop_bridge import desktop_bridge
+            desktop_skills_response = await desktop_bridge.get_available_skills()
             
-            # Format tools for Groq
-            formatted_tools = [{"type": "function", "function": t} for t in tools]
+            # Format tools for LLM
+            formatted_tools = []
+            if desktop_skills_response.get("success") and desktop_skills_response.get("tools"):
+                for tool in desktop_skills_response["tools"]:
+                    formatted_tools.append({
+                        "type": "function",
+                        "function": tool
+                    })
+            else:
+                # Fallback: define essential desktop tools manually
+                essential_tools = [
+                    {
+                        "name": "open_special_folder",
+                        "description": "Open a well-known folder directly (desktop, documents, downloads, pictures). Use this for 'open pictures/documents/downloads folder' requests.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "folder": {
+                                    "type": "string",
+                                    "enum": ["desktop", "documents", "downloads", "pictures", "onedrive_root", "onedrive_desktop", "onedrive_documents", "onedrive_pictures"],
+                                    "description": "Which special folder to open"
+                                }
+                            },
+                            "required": ["folder"]
+                        }
+                    },
+                    {
+                        "name": "open_path",
+                        "description": "Open a file or folder at a specific path",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "path": {"type": "string", "description": "Full path to open"}
+                            },
+                            "required": ["path"]
+                        }
+                    },
+                    {
+                        "name": "launch_app",
+                        "description": "Launch an application by name",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "app": {"type": "string", "description": "Application name (e.g., 'notepad', 'chrome', 'calculator')"}
+                            },
+                            "required": ["app"]
+                        }
+                    },
+                    {
+                        "name": "open_url",
+                        "description": "Open a URL in the default browser",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "url": {"type": "string", "description": "URL to open"}
+                            },
+                            "required": ["url"]
+                        }
+                    },
+                    {
+                        "name": "type_text",
+                        "description": "Type text using the keyboard",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "text": {"type": "string", "description": "Text to type"}
+                            },
+                            "required": ["text"]
+                        }
+                    },
+                    {
+                        "name": "press_key",
+                        "description": "Press a keyboard key",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "key": {"type": "string", "description": "Key to press (e.g., 'enter', 'escape', 'tab')"}
+                            },
+                            "required": ["key"]
+                        }
+                    },
+                    {
+                        "name": "take_screenshot",
+                        "description": "Take a screenshot of the screen",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {},
+                            "required": []
+                        }
+                    }
+                ]
+                formatted_tools = [{"type": "function", "function": t} for t in essential_tools]
             
             logger.info(f"🔧 Desktop specialist calling LLM with {len(formatted_tools)} tools")
             

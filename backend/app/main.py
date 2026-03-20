@@ -10,6 +10,7 @@ import os
 
 from app.config import settings
 from app.api.routes import router
+from app.api.routes import gateway as gateway_routes
 from app.utils.logger import setup_logging
 from loguru import logger
 from app.database import init_db
@@ -110,6 +111,8 @@ app.add_middleware(
 # Include API routes
 app.include_router(router, prefix="/api/v1", tags=["agent"])
 app.include_router(multi_agent.router)
+# Include gateway routes (WebSocket endpoints for desktop agent)
+app.include_router(gateway_routes.router)
 
 
 @app.get("/")

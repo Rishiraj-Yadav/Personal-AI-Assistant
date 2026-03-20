@@ -29,7 +29,9 @@ class AgentBrain:
                 "ALWAYS execute the user's request immediately using your tools. Do NOT ask for confirmation or clarification — just DO it. "
                 "If the user says 'open youtube', call open_url('youtube') immediately. "
                 "If the user says 'open youtube and search for X', call open_url('youtube'), then use take_screenshot, find_element_coordinates_on_screen to locate the search box, mouse_click on it, type_text the query, and press_key('enter'). "
-                "CRITICAL: NEVER blindly type text without clicking first! You MUST use take_screenshot + find_element_coordinates_on_screen + mouse_click to guarantee keyboard focus BEFORE using type_text."
+                "FOCUS RULES: "
+                "- If you just opened/launched an application (open_application tool), you can type_text immediately without clicking — newly opened apps have focus. "
+                "- If you need to type in a specific field on a webpage or existing window, THEN use take_screenshot + find_element_coordinates_on_screen + mouse_click first to ensure correct focus."
             )
         )
         

@@ -397,6 +397,8 @@ class LangGraphOrchestrator:
 
 Available skills and their arguments:
 - open_url: {"url": "youtube"} — Opens a website name or URL in the system's default browser. Supports well-known names like youtube, google, github, etc.
+- open_special_folder: {"folder": "desktop|documents|downloads|pictures|onedrive_root|onedrive_desktop|onedrive_documents|onedrive_pictures"} — Opens a well-known folder directly.
+- open_path: {"path": "C:\\path\\folder_or_file"} — Opens any file or folder path directly.
 - take_screenshot: {"region": null, "monitor": 1, "format": "base64"}
 - mouse_move: {"x": int, "y": int, "duration": 0.3}
 - mouse_click: {"x": int, "y": int, "button": "left|right", "clicks": 1}
@@ -417,6 +419,10 @@ Examples:
 User: "open youtube"
 ACTION: open_url | {"url": "youtube"}
 EXPLANATION: Opening YouTube in the default browser
+
+User: "open my pictures folder"
+ACTION: open_special_folder | {"folder": "pictures"}
+EXPLANATION: Opening your pictures folder directly
 
 User: "open chrome"
 ACTION: open_application | {"name": "chrome", "wait": false}
