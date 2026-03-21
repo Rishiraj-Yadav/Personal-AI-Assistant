@@ -220,6 +220,14 @@ function MessageList({ messages, isLoading, onClarificationSelect }) {
               <span className="msg-role">{message.role === 'user' ? 'You' : 'SonarBot'}</span>
               <span className="msg-time">{formatTimestamp(message.timestamp)}</span>
             </div>
+            {message.role === 'user' && message.metadata?.queueStatus && message.metadata.queueStatus !== 'done' && (
+              <div className={`msg-queue-hint msg-queue-${message.metadata.queueStatus}`}>
+                {message.metadata.queueStatus === 'sending' && '⋯ Sending'}
+                {message.metadata.queueStatus === 'queued' && '⏳ Queued'}
+                {message.metadata.queueStatus === 'running' && '⚙️ Processing'}
+                {message.metadata.queueStatus === 'cancelled' && '✕ Cancelled'}
+              </div>
+            )}
             <div className="msg-content">{message.content}</div>
 
             {message.metadata?.approval_state?.status === 'required' && (
@@ -246,6 +254,15 @@ function MessageList({ messages, isLoading, onClarificationSelect }) {
                     ))}
                   </div>
                 )}
+              </div>
+            )}
+
+            {message.metadata?.browser_input_state?.status === 'required' && (
+              <div className="browser-input-message">
+                <div className="browser-input-message-title">Browser input required</div>
+                <div className="browser-input-message-body">
+                  {message.metadata.browser_input_state.reason || `Waiting for ${message.metadata.browser_input_state.field_description || 'browser input'}.`}
+                </div>
               </div>
             )}
 

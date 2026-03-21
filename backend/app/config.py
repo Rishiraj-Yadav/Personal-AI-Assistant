@@ -122,6 +122,7 @@ Be proactive in using desktop skills when appropriate. Always use desktop_app_la
     class Config:
         env_file = ".env"
         case_sensitive = True
+        extra = "ignore"
 
     @field_validator("DEBUG", mode="before")
     @classmethod

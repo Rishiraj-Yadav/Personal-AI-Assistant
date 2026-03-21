@@ -5,7 +5,7 @@ Allows Docker backend to communicate with Desktop Agent running on host.
 import asyncio
 import os
 from pathlib import Path
-from typing import Any, Dict, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import aiohttp
 from loguru import logger
@@ -228,6 +228,51 @@ class DesktopBridgeSkill:
 
         self._capabilities_logged = True
 
+    def _normalize_nl_result(self, result: Dict[str, Any], error: Optional[str] = None) -> Dict[str, Any]:
+        """Normalize NL responses from /execute-nl and /provide-input."""
+        normalized = {
+            "success": result.get("success", False),
+            "response": result.get("response", ""),
+            "actions_taken": result.get("actions_taken", []),
+            "error": error,
+            "user_input_required": result.get("user_input_required", False),
+            "input_request": result.get("input_request"),
+            "browser_state": result.get("browser_state", {}),
+            "requires_clarification": result.get("requires_clarification", False),
+            "question": result.get("question", ""),
+            "options": result.get("options", []),
+        }
+        response_text = str(normalized.get("response") or "")
+        browser_state = normalized.get("browser_state") or {}
+        if (
+            not normalized["requires_clarification"]
+            and not normalized["user_input_required"]
+            and browser_state.get("is_open")
+            and self._looks_like_browser_question(response_text)
+        ):
+            normalized["requires_clarification"] = True
+            normalized["question"] = response_text
+            normalized["options"] = []
+        return normalized
+
+    def _looks_like_browser_question(self, text: str) -> bool:
+        normalized = " ".join(str(text or "").split()).lower()
+        if "?" not in normalized:
+            return False
+        markers = (
+            "screenshot",
+            "selector",
+            "search bar",
+            "input field",
+            "type box",
+            "browser",
+            "page",
+            "chatgpt",
+            "github",
+            "click",
+        )
+        return any(marker in normalized for marker in markers)
+
     async def execute_skill(
         self,
         skill_name: str,
@@ -340,12 +385,25 @@ class DesktopBridgeSkill:
             }
 
     async def execute_nl_command(
-        self, command: str, timeout_seconds: int = 120
+        self, command: str, timeout_seconds: int = 300,
+        user_input_callback=None,
+        conversation_context: Optional[str] = None,
+        session_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Send a natural-language command to the Desktop Agent Brain (/execute-nl).
-        Used for multi-step tasks like live browser automation where the brain
-        plans and executes autonomously using its ReAct loop.
+        If the agent pauses for user input (user_input_required=True) and
+        user_input_callback is provided, we call it with the input_request dict
+        and it should return the user's answer as a string. We then forward
+        that answer to /provide-input, which resumes the same session and
+        returns the resumed result.
+
+        Args:
+            command: Natural language command to execute
+            timeout_seconds: Max seconds to wait for a response
+            user_input_callback: Called when the agent needs user input (password/CAPTCHA)
+            conversation_context: Recent conversation context block to prepend (for follow-ups)
+            session_id: Per-user session identifier for isolated history
         """
         try:
             long_timeout = aiohttp.ClientTimeout(total=timeout_seconds)
@@ -354,7 +412,11 @@ class DesktopBridgeSkill:
                     "X-API-Key": self._get_api_key(),
                     "Content-Type": "application/json",
                 }
-                payload = {"command": command}
+                payload: Dict[str, Any] = {"command": command}
+                if conversation_context:
+                    payload["context"] = conversation_context
+                if session_id:
+                    payload["session_id"] = session_id
 
                 logger.info(
                     f"Sending NL command to Desktop Agent Brain: {command[:100]}..."
@@ -382,16 +444,33 @@ class DesktopBridgeSkill:
                         }
 
                     result = await response.json()
-                    logger.info(
-                        f"Desktop Agent Brain responded: success={result.get('success')}, "
-                        f"actions={len(result.get('actions_taken', []))}"
-                    )
-                    return {
-                        "success": result.get("success", False),
-                        "response": result.get("response", ""),
-                        "actions_taken": result.get("actions_taken", []),
-                        "error": None,
-                    }
+
+            logger.info(
+                f"Desktop Agent Brain responded: success={result.get('success')}, "
+                f"actions={len(result.get('actions_taken', []))}"
+            )
+
+            # ── Handle pause-for-user-input ─────────────────────────────
+            while result.get("user_input_required") and user_input_callback:
+                input_req = result.get("input_request", {})
+                logger.info(f"Agent needs user input: {input_req.get('field_description')}")
+                try:
+                    user_answer = await user_input_callback(input_req)
+                except Exception as exc:
+                    logger.warning(f"user_input_callback failed: {exc}")
+                    break
+
+                if user_answer is None:
+                    break
+
+                result = await self.provide_input(
+                    request_id=input_req["request_id"],
+                    value=user_answer,
+                )
+                if result.get("error"):
+                    return self._normalize_nl_result(result, error=result["error"])
+
+            return self._normalize_nl_result(result)
 
         except asyncio.TimeoutError:
             logger.error(
@@ -423,6 +502,83 @@ class DesktopBridgeSkill:
                 "response": "",
                 "actions_taken": [],
                 "error": str(exc),
+            }
+
+    async def provide_input(self, request_id: str, value: str) -> Dict[str, Any]:
+        """Send the user's answer to the desktop agent and return the resumed result."""
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+                headers = {
+                    "X-API-Key": self._get_api_key(),
+                    "Content-Type": "application/json",
+                }
+                async with session.post(
+                    f"{self.desktop_agent_url}/provide-input",
+                    json={"request_id": request_id, "value": value},
+                    headers=headers,
+                ) as response:
+                    if response.status == 200:
+                        logger.info(f"Relayed user input for request {request_id}")
+                        payload = await response.json()
+                        return self._normalize_nl_result(payload)
+
+                    logger.warning(f"provide-input returned {response.status}")
+                    error_text = await response.text()
+                    return self._normalize_nl_result(
+                        {},
+                        error=f"Desktop Agent provide-input error ({response.status}): {error_text}",
+                    )
+        except Exception as exc:
+            logger.error(f"provide_input error: {exc}")
+            return self._normalize_nl_result({}, error=str(exc))
+
+    async def check_pending_state(self, session_id: str) -> bool:
+        """Check whether the Desktop Agent session is waiting for browser input."""
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as session:
+                headers = {"X-API-Key": self._get_api_key()}
+                async with session.get(
+                    f"{self.desktop_agent_url}/pending-state/{session_id}",
+                    headers=headers,
+                ) as response:
+                    if response.status != 200:
+                        logger.debug(
+                            f"pending-state returned {response.status} for session {session_id}"
+                        )
+                        return False
+                    payload = await response.json()
+                    return bool(payload.get("is_pending", False))
+        except Exception as exc:
+            logger.debug(f"check_pending_state error for {session_id}: {exc}")
+            return False
+
+    async def get_browser_status(self, session_id: str) -> Dict[str, Any]:
+        """Query the Desktop Agent canonical browser status for a session."""
+        try:
+            result = await self.execute_skill(
+                "browser",
+                {"command": "status", "session_id": session_id},
+            )
+            if not result.get("success"):
+                return {
+                    "success": False,
+                    "result": {},
+                    "error": result.get("error") or result.get("message") or "",
+                    "error_code": result.get("error_code", "execution_failed"),
+                }
+            return {
+                "success": True,
+                "result": result.get("result") or {},
+                "error": None,
+                "error_code": result.get("error_code", "ok"),
+            }
+        except Exception as exc:
+            logger.debug(f"get_browser_status error for {session_id}: {exc}")
+            return {
+                "success": False,
+                "result": {},
+                "error": str(exc),
+                "error_code": "execution_failed",
             }
 
     async def check_connection(self) -> bool:

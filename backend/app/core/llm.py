@@ -5,6 +5,7 @@ Primary reasoning/parsing model: Gemini 2.5 Pro
 Fallback and tool-calling model: Groq
 """
 import asyncio
+import base64
 from typing import Any, Dict, List, Optional
 
 from groq import AsyncGroq
@@ -78,6 +79,80 @@ class LLMAdapter:
                 }
             )
         return formatted
+
+    def _build_gemini_inline_image_part(self, image_base64: str, mime_type: str = "image/png") -> Optional[Any]:
+        if not image_base64:
+            return None
+        try:
+            raw = base64.b64decode(image_base64)
+        except Exception:
+            return None
+
+        try:
+            import google.generativeai as genai
+
+            return genai.protos.Part(
+                inline_data=genai.protos.Blob(
+                    mime_type=mime_type or "image/png",
+                    data=raw,
+                )
+            )
+        except Exception:
+            return None
+
+    def _message_to_gemini_content(self, msg: Message) -> Optional[Any]:
+        try:
+            import google.generativeai as genai
+        except Exception:
+            return None
+
+        role_map = {
+            MessageRole.USER.value: "user",
+            MessageRole.ASSISTANT.value: "model",
+        }
+        role = role_map.get(msg.role.value)
+        if role is None:
+            return None
+
+        parts = [genai.protos.Part(text=msg.content)]
+        metadata = msg.metadata or {}
+        for image in metadata.get("images") or []:
+            if not isinstance(image, dict):
+                continue
+            image_part = self._build_gemini_inline_image_part(
+                str(image.get("image_base64", "")),
+                str(image.get("mime_type", "image/png") or "image/png"),
+            )
+            if image_part is not None:
+                parts.append(image_part)
+
+        return genai.protos.Content(role=role, parts=parts)
+
+    def _build_gemini_contents(self, messages: List[Message]) -> List[Any]:
+        import google.generativeai as genai
+
+        contents: List[Any] = []
+        system_messages = [msg.content for msg in messages if msg.role == MessageRole.SYSTEM and msg.content]
+        if system_messages:
+            system_text = "\n\n".join(system_messages)
+        else:
+            system_text = settings.SYSTEM_PROMPT
+
+        contents.append(
+            genai.protos.Content(
+                role="user",
+                parts=[genai.protos.Part(text=f"System instructions:\n{system_text}")],
+            )
+        )
+
+        for msg in messages:
+            if msg.role == MessageRole.SYSTEM:
+                continue
+            content = self._message_to_gemini_content(msg)
+            if content is not None:
+                contents.append(content)
+
+        return contents
 
     async def generate_response(
         self,
@@ -191,29 +266,17 @@ class LLMAdapter:
         if not self._gemini_available or not self._gemini_model:
             raise RuntimeError("Gemini is not configured.")
 
-        parts: List[str] = []
-        if not any(msg.role.value == "system" for msg in messages):
-            parts.append(f"System: {settings.SYSTEM_PROMPT}")
-
-        for msg in messages:
-            prefix = {
-                "system": "System",
-                "user": "User",
-                "assistant": "Assistant",
-            }.get(msg.role.value, "User")
-            parts.append(f"{prefix}: {msg.content}")
-
-        prompt = "\n\n".join(parts)
         generation_config = {
             "temperature": temperature if temperature is not None else self.gemini_temperature,
             "max_output_tokens": max_tokens or self.gemini_max_tokens,
         }
+        contents = self._build_gemini_contents(messages)
 
         loop = asyncio.get_running_loop()
         response = await loop.run_in_executor(
             None,
             lambda: self._gemini_model.generate_content(
-                prompt,
+                contents,
                 generation_config=generation_config,
             ),
         )

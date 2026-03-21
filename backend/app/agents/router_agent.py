@@ -16,8 +16,10 @@ class RouterAgent:
     Smart Router - classifies incoming tasks without user mode selection.
     """
 
-    _WEB_FAST_PATTERNS = re.compile(
-        r"brows|open\s+.{0,6}brows|"
+    # ── Compiled fast-path patterns (class-level, compiled once) ──────────────
+
+    _WEB_REFERENCE_PATTERNS = re.compile(
+        r"\b(browser|website|web page|site|tab|page)\b|"
         r"leetcode|amazon|flipkart|youtube|github|"
         r"stackoverflow|wikipedia|reddit|twitter|"
         r"linkedin|facebook|instagram|netflix|"
@@ -25,16 +27,86 @@ class RouterAgent:
         r"https?://|www\.",
         re.IGNORECASE,
     )
+
+    _WEB_FAST_PATTERNS = re.compile(
+        r"\b(open|go to|visit|browse|search|look up|research|find|compare|book|order|buy|purchase|fill|click|type|submit|sign in|log in|login|sign up)\b.*"
+        r"(\b(browser|website|web page|site|tab|page)\b|https?://|www\.|"
+        r"leetcode|amazon|flipkart|youtube|github|stackoverflow|wikipedia|reddit|twitter|linkedin|facebook|instagram|netflix|"
+        r"\.com\b|\.org\b|\.io\b|\.net\b|\.dev\b)",
+        re.IGNORECASE,
+    )
+
+    _DESKTOP_FAST_PATTERNS = re.compile(
+        r"\b(open|launch|close|minimize|maximize|focus|switch|move|resize)\b.*\b(app|application|window|notepad|calculator|vscode|visual studio code|explorer|terminal|cmd|powershell)\b|"
+        r"\b(screenshot|screen shot|capture screen|read screen|mouse|cursor|keyboard|press key|press hotkey|click at|move mouse|drag|scroll)\b|"
+        r"\b(file explorer|task manager|control panel|settings app)\b",
+        re.IGNORECASE,
+    )
+
     _EMAIL_FAST_PATTERNS = re.compile(
         r"\b(gmail|email|mail|inbox|draft|unread|send email|send mail|compose email|compose mail|cc|bcc)\b",
         re.IGNORECASE,
     )
+
     _CALENDAR_FAST_PATTERNS = re.compile(
         r"\b(calendar|google calendar|schedule|scheduled|meeting|event|appointment|remind|reminder|availability)\b",
         re.IGNORECASE,
     )
+
     _EMAIL_FOLLOWUP_PATTERNS = re.compile(
         r"^\s*(send it|yes send|send the email|send the draft|go ahead|go ahead and send)\s*[.!]*\s*$",
+        re.IGNORECASE,
+    )
+
+    # Broad patterns that indicate an information-style question.
+    # NOTE: This is intentionally broad — it is only acted on when
+    # _LIVE_DATA_PATTERNS also matches AND _PERSONAL_PATTERNS does NOT match.
+    _WEB_RESEARCH_PATTERNS = re.compile(
+        r"\bwhat\s+is\b|\bwhat\s+are\b|\bwho\s+is\b|\bwho\s+are\b"
+        r"|\blatest\b|\bcurrent\b|\btoday\b|\bright\s+now\b|\bthis\s+week\b"
+        r"|\bnews\s+about\b|\bprice\s+of\b|\bscore\s+of\b|\bhow\s+does\b"
+        r"|\bexplain\b|\btell\s+me\s+about\b|\bwhat\s+happened\b"
+        r"|\bwhen\s+is\b|\bwhere\s+is\b|\bweather\b|\bstock\s+price\b"
+        r"|\bcricket\s+score\b|\bmatch\s+result\b|\bheadlines\b|\btrending\b"
+        r"|\bjust\s+announced\b|\brecently\b|\bwho\s+won\b|\bwhat\s+happened\b"
+        r"|\bdefinition\s+of\b|\bmeaning\s+of\b|\bfact\s+about\b"
+        r"|\bipl\b|\bnifty\b|\bsensex\b|\brupee\b|\bdollar\s+rate\b"
+        r"|\bcovid\b|\belection\s+result\b|\bqualification\s+for\b",
+        re.IGNORECASE,
+    )
+
+    # Signals that the question needs LIVE data from the internet.
+    # The web fast-path only fires when at least one of these is also present.
+    _LIVE_DATA_PATTERNS = re.compile(
+        r"\b(price|cost|rate|score|result|winner|standing|ranking"
+        r"|weather|forecast|temperature|rain"
+        r"|news|headline|breaking|latest|current|today|right now|this week"
+        r"|stock|share|nifty|sensex|bitcoin|crypto|ethereum|rupee|dollar"
+        r"|cricket|ipl|football|soccer|tennis|f1|grand prix|match|fixture"
+        r"|election|vote|poll|survey"
+        r"|covid|pandemic|outbreak"
+        r"|live|update|now|happening)\b",
+        re.IGNORECASE,
+    )
+
+    # Personal / conversational phrases that should NEVER go to the web agent
+    # even if _WEB_RESEARCH_PATTERNS matches.
+    # Examples that would wrongly match _WEB_RESEARCH_PATTERNS without this guard:
+    #   "what is my name"       → matches \bwhat\s+is\b
+    #   "who are you"           → matches \bwho\s+are\b
+    #   "explain quantum physics" → matches \bexplain\b
+    #   "what can you do"       → matches \bwhat\b
+    _PERSONAL_PATTERNS = re.compile(
+        r"\b(my name|your name|who are you|what are you|how are you"
+        r"|what can you do|what do you do|help me|thank you|thanks|hello|hi\b|hey\b"
+        r"|good morning|good night|good evening|good afternoon"
+        r"|what do you think|tell me a joke|my age|my email|my phone"
+        r"|my password|my account|my profile|my data"
+        r"|i am|i'm|i feel|i need help|i want to"
+        r"|can you|could you|would you|please help"
+        r"|what is your|who made you|who created you|are you (an ai|a bot|human)"
+        r"|do you know me|do you remember|what did (i|we) say"
+        r"|favourite|favorite|opinion|preference)\b",
         re.IGNORECASE,
     )
 
@@ -63,10 +135,21 @@ class RouterAgent:
         user_message: str,
         conversation_history: Optional[list] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Short-circuit obvious Gmail and Calendar requests before web routing."""
+        """
+        Short-circuit obvious requests before the LLM classifier.
+
+        Order of checks:
+          1. Email
+          2. Email follow-up ("send it")
+          3. Calendar
+          4. Live-data web research  ← only if LIVE_DATA signal present
+                                        AND not a personal/conversational message
+          (everything else falls through to the LLM classifier)
+        """
         message_lower = user_message.lower()
         history_text = self._history_text(conversation_history)
 
+        # 1. Email
         if self._EMAIL_FAST_PATTERNS.search(user_message):
             return {
                 "task_type": "email",
@@ -75,6 +158,7 @@ class RouterAgent:
                 "next_agent": "email_specialist",
             }
 
+        # 2. Email follow-up ("send it", "go ahead", etc.) when a draft exists in history
         if self._EMAIL_FOLLOWUP_PATTERNS.match(user_message) and (
             "draft id:" in history_text or "email draft created" in history_text
         ):
@@ -85,6 +169,7 @@ class RouterAgent:
                 "next_agent": "email_specialist",
             }
 
+        # 3. Calendar
         if self._CALENDAR_FAST_PATTERNS.search(user_message) or any(
             phrase in message_lower
             for phrase in [
@@ -104,6 +189,43 @@ class RouterAgent:
                 "next_agent": "calendar_specialist",
             }
 
+        # 4. Host desktop control
+        if self._DESKTOP_FAST_PATTERNS.search(user_message):
+            return {
+                "task_type": "desktop",
+                "confidence": 0.94,
+                "reasoning": "Detected host-computer control intent.",
+                "next_agent": "desktop_specialist",
+            }
+
+        # 5. Interactive browser tasks
+        if self._WEB_FAST_PATTERNS.search(user_message):
+            return {
+                "task_type": "web_autonomous",
+                "confidence": 0.95,
+                "reasoning": "Detected interactive browser or website workflow intent.",
+                "next_agent": "web_autonomous_agent",
+            }
+
+        # 6. Live-data web research
+        #    Rules (ALL must be true to fast-path to web):
+        #      a. _WEB_RESEARCH_PATTERNS matches  (broad information-question signal)
+        #      b. _LIVE_DATA_PATTERNS also matches (needs current internet data)
+        #      c. _PERSONAL_PATTERNS does NOT match (not a personal/conversational message)
+        #      d. no browser/website-reference interaction task
+        if self._WEB_RESEARCH_PATTERNS.search(user_message):
+            is_personal = bool(self._PERSONAL_PATTERNS.search(user_message))
+            is_browser_task = bool(self._WEB_REFERENCE_PATTERNS.search(user_message))
+            has_live_signal = bool(self._LIVE_DATA_PATTERNS.search(user_message))
+
+            if has_live_signal and not is_personal and not is_browser_task:
+                return {
+                    "task_type": "web",
+                    "confidence": 0.88,
+                    "reasoning": "Live data question detected — needs internet search.",
+                    "next_agent": "web_specialist",
+                }
+
         return None
 
     def classify_task(
@@ -119,15 +241,6 @@ class RouterAgent:
         if specialist_route:
             logger.info(f"Fast-path classified as {specialist_route['task_type']}")
             return specialist_route
-
-        if self._WEB_FAST_PATTERNS.search(user_message):
-            logger.info("Fast-path classified as web_autonomous")
-            return {
-                "task_type": "web_autonomous",
-                "confidence": 0.95,
-                "reasoning": "Detected browser or website reference.",
-                "next_agent": "web_autonomous_agent",
-            }
 
         history_block = ""
         if conversation_history:
@@ -173,8 +286,8 @@ Analyze this request and classify it into ONE category:
    Examples: "what's on my calendar today", "schedule a meeting", "set a reminder"
 
 7. GENERAL - Questions, conversations, explanations, unclear requests
-   Triggers: Everything else
-   Examples: "how are you", "explain quantum physics", "what can you do"
+   Triggers: Everything else — greetings, personal questions, factual explanations, "who are you", "what is your name", "explain X" (without needing live data)
+   Examples: "how are you", "what is your name", "explain quantum physics", "what can you do", "who created you", "tell me a joke"
 
 IMPORTANT RULES:
 - If user mentions code/programming/app/API -> CODING
@@ -186,8 +299,11 @@ IMPORTANT RULES:
 - If user mentions gmail/email/mail/inbox -> EMAIL even though it is a Google product
 - If user mentions Google Calendar/calendar/schedule/meeting/reminder -> CALENDAR, not WEB_AUTONOMOUS
 - If user says "send it" after an email draft was created -> EMAIL
+- Personal questions ("what is my name", "who are you", "how are you") -> GENERAL
+- Conversational messages ("hello", "thanks", "help me") -> GENERAL
 - If in doubt between DESKTOP and WEB_AUTONOMOUS, choose WEB_AUTONOMOUS
 - If in doubt between WEB and WEB_AUTONOMOUS, choose WEB_AUTONOMOUS
+- If in doubt between WEB and GENERAL (no live data needed), choose GENERAL
 
 Respond EXACTLY in this format:
 TASK_TYPE: [coding/desktop/web_autonomous/web/email/calendar/general]
@@ -242,131 +358,50 @@ Classify now:"""
         return routing_map.get(task_type, "general_assistant")
 
     def _fallback_classification(self, message: str) -> Dict[str, Any]:
-        """Keyword-based fallback."""
+        """Keyword-based fallback when LLM classification fails."""
         message_lower = message.lower()
 
         coding_keywords = [
-            "write",
-            "code",
-            "script",
-            "program",
-            "function",
-            "class",
-            "python",
-            "javascript",
-            "react",
-            "flask",
-            "api",
-            "app",
-            "create",
-            "build",
-            "make",
-            "generate",
-            "develop",
-            "debug",
-            "fix",
-            "test",
-            "compile",
-            "execute",
-            "run",
+            "write", "code", "script", "program", "function", "class",
+            "python", "javascript", "react", "flask", "api", "app",
+            "create", "build", "make", "generate", "develop",
+            "debug", "fix", "test", "compile", "execute", "run",
         ]
 
         desktop_keywords = [
-            "click",
-            "screenshot",
-            "mouse",
-            "keyboard",
-            "window",
-            "minimize",
-            "maximize",
-            "launch app",
-            "launch vs",
-            "launch notepad",
-            "take screenshot",
-            "move mouse",
-            "press key",
+            "click", "screenshot", "mouse", "keyboard", "window",
+            "minimize", "maximize", "launch app", "launch vs",
+            "launch notepad", "take screenshot", "move mouse", "press key",
         ]
 
         email_keywords = [
-            "email",
-            "mail",
-            "inbox",
-            "compose",
-            "send email",
-            "draft",
-            "unread",
-            "gmail",
-            "send mail",
+            "email", "mail", "inbox", "compose", "send email",
+            "draft", "unread", "gmail", "send mail",
         ]
 
         calendar_keywords = [
-            "calendar",
-            "google calendar",
-            "schedule",
-            "meeting",
-            "event",
-            "appointment",
-            "remind",
-            "reminder",
-            "what's on",
+            "calendar", "google calendar", "schedule", "meeting",
+            "event", "appointment", "remind", "reminder", "what's on",
         ]
 
         web_auto_keywords = [
-            "browse",
-            "browser",
-            "open browser",
-            "search the web",
-            "find on",
-            "go to",
-            "visit",
-            "look up",
-            "research",
-            "compare",
-            "book",
-            "check price",
-            "find flights",
-            "order",
-            "search for",
-            "find me",
-            "search google",
-            "google search",
-            "web search",
-            "browse to",
-            "open website",
-            "fill form",
-            "show me",
-            "look for",
-            "buy online",
-            "purchase online",
+            "browse", "browser", "open browser", "search the web",
+            "find on", "go to", "visit", "look up", "research",
+            "compare", "book", "check price", "find flights", "order",
+            "search for", "find me", "search google", "google search",
+            "web search", "browse to", "open website", "fill form",
+            "show me", "look for", "buy online", "purchase online",
         ]
 
         website_names = [
-            "leetcode",
-            "amazon",
-            "flipkart",
-            "youtube",
-            "github",
-            "stackoverflow",
-            "wikipedia",
-            "reddit",
-            "twitter",
-            "linkedin",
-            "facebook",
-            "instagram",
-            "netflix",
-            ".com",
-            ".org",
-            ".io",
-            ".net",
-            ".dev",
-            "http",
+            "leetcode", "amazon", "flipkart", "youtube", "github",
+            "stackoverflow", "wikipedia", "reddit", "twitter",
+            "linkedin", "facebook", "instagram", "netflix",
+            ".com", ".org", ".io", ".net", ".dev", "http",
         ]
 
         web_keywords = [
-            "scrape",
-            "weather",
-            "fetch",
-            "download",
+            "scrape", "weather", "fetch", "download",
         ]
 
         if any(keyword in message_lower for keyword in coding_keywords):

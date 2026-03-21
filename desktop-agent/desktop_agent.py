@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Dict, Any, Optional, List
 import asyncio
+import uuid
 import uvicorn
 from loguru import logger
 import sys
@@ -20,6 +21,70 @@ sys.path.insert(0, str(Path(__file__).parent))
 from config import settings, save_api_key
 from skill_registry import registry
 from agent_brain import brain
+
+
+# ───── Pending User-Input Store ─────
+class PendingInputStore:
+    """Thread-safe store for pending browser/user-input requests by request ID."""
+
+    def __init__(self):
+        self._lock = asyncio.Lock()
+        self._store: Dict[str, Dict[str, Any]] = {}
+
+    async def create(
+        self,
+        session_id: str,
+        field_description: str,
+        input_type: str,
+        reason: str,
+    ) -> str:
+        request_id = str(uuid.uuid4())
+        async with self._lock:
+            self._store[request_id] = {
+                "session_id": session_id,
+                "field_description": field_description,
+                "input_type": input_type,
+                "reason": reason,
+            }
+        return request_id
+
+    async def consume(self, request_id: str) -> Optional[Dict[str, Any]]:
+        async with self._lock:
+            return self._store.pop(request_id, None)
+
+    async def get_pending(self, request_id: str) -> Optional[Dict[str, Any]]:
+        async with self._lock:
+            entry = self._store.get(request_id)
+            if not entry:
+                return None
+            return {
+                "request_id": request_id,
+                "session_id": entry["session_id"],
+                "field_description": entry["field_description"],
+                "input_type": entry["input_type"],
+                "reason": entry["reason"],
+            }
+
+    async def clear(self) -> None:
+        async with self._lock:
+            self._store.clear()
+
+
+pending_input_store = PendingInputStore()
+
+
+def build_nl_response_body(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize brain output into the public /execute-nl contract."""
+    return {
+        "response": result.get("response", ""),
+        "actions_taken": result.get("actions_taken", []),
+        "success": result.get("success", False),
+        "browser_state": result.get("browser_state", {}),
+        "requires_clarification": result.get("requires_clarification", False),
+        "question": result.get("question", ""),
+        "options": result.get("options", []),
+        "user_input_required": result.get("user_input_required", False),
+    }
 
 
 # ───── Initialize Agents ─────
@@ -121,6 +186,7 @@ class NLCommandRequest(BaseModel):
     """Natural language command request"""
     command: str
     context: Optional[str] = None
+    session_id: Optional[str] = "default"
 
 
 class NLCommandResponse(BaseModel):
@@ -185,7 +251,21 @@ async def health():
     }
 
 
-@app.post("/execute-nl", response_model=NLCommandResponse)
+@app.get("/pending-state/{session_id}")
+async def get_pending_state(session_id: str, api_key: str = Depends(verify_api_key)):
+    """Check if the given session is currently waiting for user input or clarification."""
+    state = brain._pending_input_states.get(session_id)
+    if state:
+        return {
+            "is_pending": True,
+            "pending_type": state.get("pending_type"),
+            "question": state.get("question", ""),
+            "field_description": state.get("field_description", ""),
+        }
+    return {"is_pending": False}
+
+
+@app.post("/execute-nl")
 async def execute_natural_language(
     request: NLCommandRequest,
     api_key: str = Depends(verify_api_key),
@@ -193,19 +273,102 @@ async def execute_natural_language(
     """
     Execute a natural language command.
     The Orchestrator Agent Brain will plan and execute the necessary steps.
+    Returns a superset of NLCommandResponse that includes user_input_required
+    when the agent has paused and is waiting for the user to supply a value.
     """
     try:
-        logger.info(f"📨 NL Command: {request.command}")
-        result = await brain.process_command(request.command)
-
-        return NLCommandResponse(
-            response=result["response"],
-            actions_taken=result.get("actions_taken", []),
-            success=result.get("success", False),
+        session_id = request.session_id or "default"
+        logger.info(f"📨 NL Command [{session_id}]: {request.command}")
+        result = await brain.process_command(
+            request.command,
+            session_id=session_id,
+            context=request.context,
         )
+
+        response_body = build_nl_response_body(result)
+
+        # If the brain paused for user input, expose the pending request details
+        # so the caller (backend) can relay the question to the user.
+        pending = result.get("pending_input")
+        if pending:
+            request_id = await pending_input_store.create(
+                session_id=session_id,
+                field_description=pending.get("field_description", "input"),
+                input_type=pending.get("input_type", "text"),
+                reason=pending.get("reason", ""),
+            )
+            response_body["user_input_required"] = True
+            response_body["input_request"] = {
+                "request_id": request_id,
+                "session_id": session_id,
+                "field_description": pending.get("field_description", "input"),
+                "input_type": pending.get("input_type", "text"),
+                "reason": pending.get("reason", ""),
+            }
+        elif not response_body["user_input_required"]:
+            response_body.pop("input_request", None)
+
+        return response_body
     except Exception as e:
         logger.error(f"NL execution error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+class ProvideInputRequest(BaseModel):
+    request_id: str
+    value: str
+
+
+@app.post("/provide-input")
+async def provide_user_input(
+    request: ProvideInputRequest,
+    api_key: str = Depends(verify_api_key),
+):
+    """
+    Receive the user's answer to a pending browser_request_user_input call
+    and resume the original NL task in the same session.
+    """
+    pending = await pending_input_store.consume(request.request_id)
+    if not pending:
+        raise HTTPException(status_code=404, detail="No pending input request with that ID")
+    logger.info(f"✅ User provided input for request {request.request_id}")
+    result = await brain.process_command(
+        request.value,
+        session_id=pending["session_id"],
+    )
+    response_body = build_nl_response_body(result)
+    response_body["request_id"] = request.request_id
+
+    chained_pending = result.get("pending_input")
+    if chained_pending:
+        next_request_id = await pending_input_store.create(
+            session_id=pending["session_id"],
+            field_description=chained_pending.get("field_description", "input"),
+            input_type=chained_pending.get("input_type", "text"),
+            reason=chained_pending.get("reason", ""),
+        )
+        response_body["user_input_required"] = True
+        response_body["input_request"] = {
+            "request_id": next_request_id,
+            "session_id": pending["session_id"],
+            "field_description": chained_pending.get("field_description", "input"),
+            "input_type": chained_pending.get("input_type", "text"),
+            "reason": chained_pending.get("reason", ""),
+        }
+
+    return response_body
+
+
+@app.get("/pending-input/{request_id}")
+async def get_pending_input(
+    request_id: str,
+    api_key: str = Depends(verify_api_key),
+):
+    """Get details of a pending user-input request."""
+    info = await pending_input_store.get_pending(request_id)
+    if not info:
+        raise HTTPException(status_code=404, detail="No pending input request with that ID")
+    return info
 
 
 @app.post("/execute", response_model=SkillExecutionResponse)
@@ -259,6 +422,7 @@ async def list_capabilities(api_key: str = Depends(verify_api_key)):
 async def clear_history(api_key: str = Depends(verify_api_key)):
     """Clear the brain's conversation history"""
     brain.clear_history()
+    await pending_input_store.clear()
     return {"success": True, "message": "Conversation history cleared"}
 
 

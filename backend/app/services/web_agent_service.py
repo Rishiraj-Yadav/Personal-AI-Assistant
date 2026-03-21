@@ -15,6 +15,7 @@ Uses Playwright for browser control, Gemini/Groq for vision + reasoning.
 
 import asyncio
 import base64
+import io
 import json
 import os
 import re
@@ -25,6 +26,16 @@ from loguru import logger
 
 # Playwright is already in requirements.txt
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
+
+try:
+    from PIL import Image
+except Exception:  # pragma: no cover - optional dependency guard
+    Image = None
+
+try:
+    import pytesseract
+except Exception:  # pragma: no cover - optional dependency guard
+    pytesseract = None
 
 
 # Actions that require explicit user permission
@@ -54,7 +65,6 @@ class WebAgentSession:
         self.browser = await self.playwright.chromium.launch(
             headless=True,
             args=[
-                "--no-sandbox",
                 "--disable-dev-shm-usage",
                 "--disable-gpu",
                 "--disable-extensions",
@@ -96,6 +106,35 @@ class WebAgentSession:
         except Exception as e:
             logger.error(f"Screenshot error: {e}")
             return ""
+
+    def _normalize_text(self, value: str, *, max_chars: int = 0) -> str:
+        text = " ".join(str(value or "").split()).strip()
+        if max_chars > 0:
+            return text[:max_chars]
+        return text
+
+    def _ocr_text_from_png(self, png_bytes: bytes, *, max_chars: int = 2500) -> str:
+        if not png_bytes or pytesseract is None or Image is None:
+            return ""
+        try:
+            image = Image.open(io.BytesIO(png_bytes))
+            text = pytesseract.image_to_string(image, lang="eng")
+        except Exception:
+            return ""
+        return self._normalize_text(text, max_chars=max_chars)
+
+    def _merge_visible_text(self, dom_text: str, ocr_text: str, *, max_chars: int = 3000) -> str:
+        dom = self._normalize_text(dom_text)
+        ocr = self._normalize_text(ocr_text)
+        if not dom:
+            return ocr[:max_chars]
+        if not ocr:
+            return dom[:max_chars]
+        if ocr.lower() in dom.lower():
+            return dom[:max_chars]
+        if dom.lower() in ocr.lower():
+            return ocr[:max_chars]
+        return f"{dom} OCR visible text: {ocr}"[:max_chars]
 
     async def get_page_info(self) -> Dict[str, Any]:
         """Extract structured info from current page via DOM inspection."""
@@ -155,6 +194,18 @@ class WebAgentSession:
                     viewportHeight: window.innerHeight
                 };
             }""")
+            ocr_text = ""
+            try:
+                png_bytes = await self.page.screenshot(full_page=False, type="png")
+                ocr_text = self._ocr_text_from_png(png_bytes, max_chars=2500)
+            except Exception:
+                ocr_text = ""
+
+            visible_text = self._merge_visible_text(info.get("bodyText", ""), ocr_text, max_chars=3000)
+            info["ocrText"] = ocr_text
+            info["visibleText"] = visible_text
+            info["observationMode"] = "dom+ocr" if info.get("bodyText") and ocr_text else ("ocr" if ocr_text else "dom")
+            info["bodyText"] = visible_text
             return info
         except Exception as e:
             logger.error(f"Page info extraction error: {e}")
@@ -252,7 +303,8 @@ class WebAgentSession:
                 el = await self.page.query_selector(selector)
                 text = await el.inner_text() if el else ""
             else:
-                text = await self.page.evaluate("() => document.body.innerText.substring(0, 5000)")
+                info = await self.get_page_info()
+                text = info.get("visibleText", "") or info.get("bodyText", "")
             return {"success": True, "text": text}
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -276,7 +328,7 @@ class WebAgentService:
     def __init__(self):
         self._sessions: Dict[str, WebAgentSession] = {}
         self._pending_permissions: Dict[str, Dict] = {}  # user_id -> pending action
-        self.max_steps = 5  # keep autonomous browsing bounded and predictable
+        self.max_steps = 15  # support complex multi-step tasks
         logger.info("✅ Web Agent Service initialized")
 
     async def get_or_create_session(self, user_id: str) -> WebAgentSession:
@@ -361,6 +413,7 @@ class WebAgentService:
                     step=step,
                     plan=plan,
                     user_context=user_context,
+                    screenshot_base64=screenshot_b64,
                 )
 
                 if action["type"] == "done":
@@ -452,6 +505,7 @@ class WebAgentService:
                 actions_taken=actions_taken,
                 final_page_info=final_info,
                 user_context=user_context,
+                final_screenshot_b64=final_screenshot,
             )
             output_parts.append(summary)
 
@@ -552,7 +606,7 @@ RULES:
     async def _decide_next_action(
         self, llm, user_message: str, page_info: Dict,
         actions_taken: List[Dict], step: int, plan: Dict,
-        user_context: str = ""
+        user_context: str = "", screenshot_base64: str = ""
     ) -> Dict:
         """LLM decides the next action based on current page state."""
         from app.models import Message, MessageRole
@@ -585,6 +639,8 @@ Available actions:
 - scroll: Scroll page. {{"type": "scroll", "direction": "down", "amount": 500, "description": "..."}}
 - go_back: Go to previous page. {{"type": "go_back", "description": "..."}}
 - extract: Extract specific info. {{"type": "extract", "selector": "css_selector", "description": "..."}}
+- extract_table: Extract table data as JSON. {{"type": "extract_table", "table_index": 0, "description": "..."}}
+- wait: Wait for an element to appear. {{"type": "wait", "selector": "css_selector", "timeout_ms": 10000, "description": "..."}}
 - submit_form: Submit a form (NEEDS PERMISSION). {{"type": "submit_form", "description": "..."}}
 - done: Task is complete. {{"type": "done", "summary": "Here is what I found: ..."}}
 - error: Something went wrong. {{"type": "error", "error": "Description of the problem"}}
@@ -596,11 +652,29 @@ RULES:
 4. For search: navigate to google, type query in search input, press Enter
 5. If stuck after 3 failed actions, try a different approach or report error
 6. Mark submit_form, purchase, login actions as sensitive — they need permission
-7. ALWAYS respond with valid JSON
+7. Use extract_table for any tabular data (prices, flight results, scores, stocks)
+8. Use wait when content may load dynamically before interacting
+9. ALWAYS respond with valid JSON
 
 Respond with EXACTLY ONE JSON action:"""
             ),
         ]
+
+        if screenshot_base64:
+            messages.append(
+                Message(
+                    role=MessageRole.USER,
+                    content="Latest browser viewport image attached. Use it together with the DOM/OCR summary to choose the next action.",
+                    metadata={
+                        "images": [
+                            {
+                                "image_base64": screenshot_base64,
+                                "mime_type": "image/png",
+                            }
+                        ]
+                    },
+                )
+            )
 
         result = await llm.generate_response(messages)
         response_text = result.get("response", "")
@@ -652,6 +726,45 @@ Respond with EXACTLY ONE JSON action:"""
                 return await session.go_back()
             elif action_type == "extract":
                 return await session.extract_text(action.get("selector"))
+            elif action_type == "extract_table":
+                # Extract HTML table as JSON from the current page
+                table_idx = action.get("table_index", 0)
+                js = f"""
+                () => {{
+                    const tables = document.querySelectorAll('table');
+                    if ({table_idx} >= tables.length) return {{error: 'No table at index {table_idx}'}};
+                    const tbl = tables[{table_idx}];
+                    const rows = Array.from(tbl.querySelectorAll('tr'));
+                    if (!rows.length) return {{headers: [], rows: [], total: 0}};
+                    const headers = Array.from(rows[0].querySelectorAll('th,td')).map(c => c.innerText.trim());
+                    const dataRows = rows.slice(1).map(row => {{
+                        const cells = Array.from(row.querySelectorAll('td,th')).map(c => c.innerText.trim());
+                        if (headers.length && cells.length === headers.length) {{
+                            const obj = {{}};
+                            headers.forEach((h, i) => {{ obj[h] = cells[i]; }});
+                            return obj;
+                        }}
+                        return cells;
+                    }});
+                    return {{headers, rows: dataRows, total: dataRows.length}};
+                }}
+                """
+                try:
+                    result = await session.page.evaluate(js)
+                    if isinstance(result, dict) and "error" not in result:
+                        return {"success": True, "text": json.dumps(result, ensure_ascii=False)}
+                    return {"success": False, "error": result.get("error", "Table extraction failed")}
+                except Exception as te:
+                    return {"success": False, "error": str(te)}
+            elif action_type == "wait":
+                # Wait for a CSS selector to appear
+                selector = action.get("selector", "body")
+                timeout_ms = action.get("timeout_ms", 10000)
+                try:
+                    await session.page.wait_for_selector(selector, state="visible", timeout=timeout_ms)
+                    return {"success": True, "selector": selector}
+                except Exception as we:
+                    return {"success": False, "error": f"Timeout waiting for '{selector}': {we}"}
             elif action_type == "submit_form":
                 # Submit = press Enter or click submit button
                 return await session.press_key("Enter")
@@ -662,12 +775,12 @@ Respond with EXACTLY ONE JSON action:"""
 
     async def _generate_summary(
         self, llm, user_message: str, actions_taken: List[Dict],
-        final_page_info: Dict, user_context: str = ""
+        final_page_info: Dict, user_context: str = "", final_screenshot_b64: str = ""
     ) -> str:
         """Generate a final summary of what was accomplished."""
         from app.models import Message, MessageRole
 
-        page_text = final_page_info.get("bodyText", "")[:2000]
+        page_text = (final_page_info.get("visibleText") or final_page_info.get("bodyText", ""))[:2000]
         page_title = final_page_info.get("title", "")
 
         actions_desc = self._format_actions_taken(actions_taken)
@@ -694,6 +807,22 @@ PAGE CONTENT (excerpt):
 Please provide a clear, helpful summary of what was found/accomplished."""
             )
         ]
+
+        if final_screenshot_b64:
+            messages.append(
+                Message(
+                    role=MessageRole.USER,
+                    content="Latest browser viewport image attached. Use it together with the DOM/OCR summary when writing the final answer.",
+                    metadata={
+                        "images": [
+                            {
+                                "image_base64": final_screenshot_b64,
+                                "mime_type": "image/png",
+                            }
+                        ]
+                    },
+                )
+            )
 
         result = await llm.generate_response(messages)
         return result.get("response", "Task completed but could not generate summary.")
@@ -732,6 +861,8 @@ Please provide a clear, helpful summary of what was found/accomplished."""
         parts = []
         parts.append(f"URL: {info.get('url', 'unknown')}")
         parts.append(f"Title: {info.get('title', 'unknown')}")
+        if info.get("observationMode"):
+            parts.append(f"Observation mode: {info['observationMode']}")
 
         if info.get("description"):
             parts.append(f"Description: {info['description']}")
@@ -761,7 +892,7 @@ Please provide a clear, helpful summary of what was found/accomplished."""
                 label = inp.get("label") or inp.get("placeholder") or inp.get("name") or "unnamed"
                 parts.append(f"  [{inp['index']}] {label} (type={inp['type']}, name={inp.get('name', '')})")
 
-        text = info.get("bodyText", "")
+        text = info.get("visibleText") or info.get("bodyText", "")
         if text:
             parts.append(f"Page Content (first 1000 chars):\n{text[:1000]}")
 

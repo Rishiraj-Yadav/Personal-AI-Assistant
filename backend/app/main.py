@@ -49,6 +49,25 @@ async def lifespan(app: FastAPI):
     from app.services.virtual_desktop_service import virtual_desktop_service
     asyncio.create_task(virtual_desktop_service.start_cleanup_loop())
     logger.info("✅ Virtual desktop cleanup loop started")
+
+    # Probe Desktop Agent browser availability once at startup.
+    try:
+        from app.skills.desktop_bridge import desktop_bridge
+
+        desktop_ok = await desktop_bridge.check_connection()
+        if desktop_ok:
+            capabilities = await desktop_bridge.get_available_skills()
+            logger.info(
+                "✅ Desktop Agent reachable for live browser routing"
+                f" ({len(capabilities.get('tools', []) or [])} tools reported)"
+            )
+        else:
+            logger.warning(
+                "⚠️ Desktop Agent unavailable at startup. "
+                "Interactive browser tasks will require fallback or fail cleanly."
+            )
+    except Exception as exc:
+        logger.warning(f"⚠️ Desktop Agent startup probe failed: {exc}")
     
     # Create logs directory if it doesn't exist
     os.makedirs("logs", exist_ok=True)

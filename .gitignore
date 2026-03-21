@@ -54,3 +54,16 @@ build/
 
 # Keep this README
 !README.md
+
+
+
+# Ignore runtime data
+desktop-agent/data/
+desktop-agent/browser_runtime/
+
+# Ignore cache/session files
+**/Cache/
+**/Cache_Data/
+**/Default/
+**/Local Storage/
+**/Session Storage/

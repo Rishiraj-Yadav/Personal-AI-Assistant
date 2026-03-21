@@ -42,6 +42,8 @@ class MultiAgentResponse(BaseModel):
     execution_trace: List[Dict[str, Any]] = Field(default_factory=list)
     approval_state: Optional[Dict[str, Any]] = None
     clarification_state: Optional[Dict[str, Any]] = None
+    browser_input_state: Optional[Dict[str, Any]] = None
+    browser_state: Dict[str, Any] = Field(default_factory=dict)
     artifacts: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
     agent_path: List[str]
@@ -66,6 +68,8 @@ async def generate_code(request: MultiAgentRequest):
                 confidence=1.0,
                 response=result.get("response", ""),
                 metadata=result.get("metadata", {}),
+                browser_input_state=None,
+                browser_state={},
                 agent_path=["slash_command"]
             )
         
@@ -97,6 +101,8 @@ async def generate_code(request: MultiAgentRequest):
             execution_trace=result.get("execution_trace", []),
             approval_state=result.get("approval_state"),
             clarification_state=result.get("clarification_state"),
+            browser_input_state=result.get("browser_input_state"),
+            browser_state=result.get("browser_state", {}),
             artifacts=result.get("artifacts"),
             error=result.get("error"),
             agent_path=result.get("agent_path", [])
@@ -111,142 +117,96 @@ async def generate_code(request: MultiAgentRequest):
 
 @router.websocket("/stream")
 async def code_generation_stream(websocket: WebSocket):
-    """Smart WebSocket with LangGraph + persistent memory"""
-    await websocket.accept()
+    """Smart WebSocket with LangGraph + persistent memory.
     
+    Browser input resumes are sent as a fresh websocket request using
+    `type: "agent_answer"` plus the same user/conversation ids.
+    """
+    await websocket.accept()
     try:
         data = await websocket.receive_json()
-        message = data.get("message", "")
+        request_type = data.get("type", "message")
+        message = data.get("value", "") if request_type == "agent_answer" else data.get("message", "")
         user_id = data.get("user_id", "anonymous")
         conversation_id = data.get("conversation_id") or f"conv_{datetime.now().timestamp()}"
         max_iterations = data.get("max_iterations", 3)
-        
+
         logger.info(f"🔌 WebSocket from {user_id}: {message[:50]}...")
-        
-        # === SLASH COMMAND HANDLING ===
-        if slash_command_service.is_slash_command(message):
-            logger.info(f"⚡ Slash command: {message}")
-            result = await slash_command_service.execute(
-                message=message,
-                user_id=user_id,
-                conversation_id=conversation_id
-            )
-            await websocket.send_json({
-                "type": "complete",
-                "success": True,
-                "result": {
-                    "task_type": "slash_command",
-                    "response": result.get("response", ""),
-                    "conversation_id": conversation_id,
-                    "action": result.get("action"),
-                    "agent_path": ["slash_command"],
-                    "metadata": result.get("metadata", {})
-                },
-                "timestamp": datetime.now(timezone.utc).isoformat()
-            })
-            return
-        
-        # Callback for progress updates
-        async def send_to_frontend(msg_data: Dict[str, Any]):
+
+        await websocket.send_json(
+            {
+                "type": "processing",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+        # ── Two-way communication queue ───────────────────────────────
+        async def _message_callback(event: dict):
+            """Relay orchestrator events to the WebSocket client."""
             try:
-                payload = {
-                    "type": msg_data.get("type", "status"),
-                    "message": msg_data.get("message", ""),
-                    "timestamp": datetime.now(timezone.utc).isoformat()
-                }
-                for key, value in msg_data.items():
-                    if key not in {"type", "message"}:
-                        payload[key] = value
-                # Forward web agent specific data
-                if msg_data.get("type", "").startswith("web_agent_"):
-                    if "action" in msg_data:
-                        payload["action"] = msg_data["action"]
-                    if "plan" in msg_data:
-                        payload["plan"] = msg_data["plan"]
-                    if "step" in msg_data:
-                        payload["step"] = msg_data["step"]
-                    if "success" in msg_data:
-                        payload["success"] = msg_data["success"]
-                await websocket.send_json(jsonable_encoder(payload))
-            except Exception as e:
-                logger.warning(f"⚠️ Send failed: {e}")
-        
-        # Initial message
-        await websocket.send_json({
-            "type": "context",
-            "message": "🧠 Loading personalized context...",
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        })
-        
-        # Process with LangGraph
+                await websocket.send_json(jsonable_encoder(event))
+            except Exception as _e:
+                logger.warning(f"WebSocket send failed: {_e}")
+
+        # Provide callbacks to the orchestrator via metadata
+        extra_metadata = {
+            "_message_callback": _message_callback,
+        }
+
+        # ── Run orchestrator + listen for agent_answer concurrently ───
         result = await langgraph_orchestrator.process(
             user_message=message,
             user_id=user_id,
             conversation_id=conversation_id,
             max_iterations=max_iterations,
-            message_callback=send_to_frontend
+            extra_metadata=extra_metadata,
         )
-        
-        # Send classification
-        await websocket.send_json({
-            "type": "classification",
-            "task_type": result.get("task_type"),
-            "confidence": result.get("confidence"),
-            "message": f"📍 Task: {result.get('task_type')}",
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        })
-        
-        # Send agent path
-        if result.get("agent_path"):
-            await websocket.send_json({
-                "type": "agents",
-                "message": f"🤖 Agents: {' → '.join(result['agent_path'])}",
-                "timestamp": datetime.now(timezone.utc).isoformat()
-            })
-        
-        # Send completion
-        await websocket.send_json(jsonable_encoder({
-            "type": "complete",
-            "success": result.get("success"),
-            "result": {
-                "task_type": result.get("task_type"),
-                "response": result.get("output"),
-                "conversation_id": conversation_id,
-                "code": result.get("code"),
-                "files": result.get("files"),
-                "file_path": result.get("file_path"),
-                "project_structure": result.get("project_structure"),
-                "main_file": result.get("main_file"),
-                "server_running": result.get("server_running"),
-                "server_url": result.get("server_url"),
-                "language": result.get("language"),
-                "metadata": result.get("metadata"),
-                "agent_path": result.get("agent_path"),
-                "plan": result.get("plan"),
-                "execution_trace": result.get("execution_trace", []),
-                "approval_state": result.get("approval_state"),
-                "clarification_state": result.get("clarification_state"),
-                "artifacts": result.get("artifacts"),
-                "web_screenshots": result.get("metadata", {}).get("web_screenshots", []),
-                "web_current_url": result.get("metadata", {}).get("web_current_url", ""),
-                "web_autonomous": result.get("metadata", {}).get("web_autonomous", False),
-            },
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        }))
-    
+
+        async def _listen_for_answers():
+            """While the orchestrator is running, forward user answers."""
+            while True:
+                try:
+                    incoming = await _asyncio.wait_for(
+                        websocket.receive_json(), timeout=1.0
+                    )
+                    msg_type = incoming.get("type", "")
+                    if msg_type == "agent_answer":
+                        value = incoming.get("value", "")
+                        await answer_queue.put(value)
+                        logger.info(f"Got agent_answer from user: {value[:30]}...")
+                except _asyncio.TimeoutError:
+                    pass  # no message yet — keep polling
+                except Exception:
+                    break  # disconnected or orchestrator done
+
+
+        await websocket.send_json(
+            jsonable_encoder(
+                {
+                    "type": "complete",
+                    "result": result,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        )
+
     except WebSocketDisconnect:
         logger.info("🔌 WebSocket disconnected")
     except Exception as e:
         logger.error(f"❌ WebSocket error: {e}")
         try:
-            await websocket.send_json({
-                "type": "error",
-                "message": f"Error: {str(e)}",
-                "timestamp": datetime.now(timezone.utc).isoformat()
-            })
-        except:
+            await websocket.send_json(
+                {
+                    "type": "error",
+                    "message": f"Error: {str(e)}",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        except Exception:
             pass
 
+
+# ── Conversations ─────────────────────────────────────────────────────────────
 
 @router.get("/conversations")
 async def list_conversations(user_id: str):
@@ -259,7 +219,7 @@ async def list_conversations(user_id: str):
         return []
 
 
-# ===== WEB AGENT ENDPOINTS =====
+# ── Web Agent endpoints ───────────────────────────────────────────────────────
 
 class WebAgentPermissionRequest(BaseModel):
     user_id: str
@@ -321,6 +281,8 @@ async def respond_to_guarded_approval(request: ApprovalDecisionRequest):
                     "approval_id": request.approval_id,
                     "affected_steps": approval.affected_steps,
                 },
+                browser_input_state=None,
+                browser_state={},
                 artifacts={},
                 agent_path=["approval_denied"],
             )
@@ -363,6 +325,8 @@ async def respond_to_guarded_approval(request: ApprovalDecisionRequest):
                 "approval_id": request.approval_id,
             },
             clarification_state=result.get("clarification_state"),
+            browser_input_state=result.get("browser_input_state"),
+            browser_state=result.get("browser_state", {}),
             artifacts=result.get("artifacts"),
             error=result.get("error"),
             agent_path=result.get("agent_path", []),
@@ -386,6 +350,8 @@ async def close_web_session(user_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ── Conversation & memory ─────────────────────────────────────────────────────
+
 @router.get("/conversation/{conversation_id}")
 async def get_conversation_history(conversation_id: str):
     """Load conversation history from database"""
@@ -402,7 +368,6 @@ async def get_conversation_history(conversation_id: str):
                 detail=f"Conversation {conversation_id} not found"
             )
         
-        # Convert to frontend format
         frontend_messages = []
         for msg in messages:
             frontend_messages.append({
@@ -446,6 +411,8 @@ async def get_memory_stats(user_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ── Health ────────────────────────────────────────────────────────────────────
+
 @router.get("/health")
 async def multi_agent_health():
     """Health check with memory status"""
@@ -482,7 +449,8 @@ async def multi_agent_health():
             "Agent-to-agent routing",
             "Autonomous web agent (Perplexity Comet-style)",
             "Web agent permission system",
-            "Model failover (Groq → Gemini)"
+            "Model failover (Groq → Gemini)",
+
         ],
         "timestamp": datetime.now(timezone.utc).isoformat()
     }

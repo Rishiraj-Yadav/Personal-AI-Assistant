@@ -76,6 +76,7 @@ class AgentState(TypedDict):
     web_actions: List[Dict]
     web_current_url: str
     web_permission_needed: Dict
+    browser_state: Dict[str, Any]
 
 
 class LangGraphOrchestrator:
@@ -203,6 +204,37 @@ class LangGraphOrchestrator:
         logger.info("🎯 Routing task...")
         
         try:
+            # ── Fast path: check if the desktop agent is waiting for an answer ──
+            from app.skills.desktop_bridge import DesktopBridgeSkill
+            bridge = DesktopBridgeSkill()
+            user_id = state.get('user_id', 'default')
+            
+            is_pending = await bridge.check_pending_state(user_id)
+            if is_pending:
+                logger.info("🎯 Routing to web_autonomous_agent because user has a pending input state")
+                state['task_type'] = 'web_autonomous'
+                state['confidence'] = 1.0
+                state['routing_reason'] = "User is answering a pending request from the browser agent."
+                state['agent_path'].append('router')
+                return state
+
+            browser_status = await bridge.get_browser_status(user_id)
+            browser_result = browser_status.get("result") or {}
+            browser_running = bool(
+                browser_status.get("success")
+                and browser_result.get("running")
+                and browser_result.get("connected")
+            )
+            if browser_running and self._looks_page_relative_follow_up(state.get('user_message', '')):
+                logger.info("ðŸŽ¯ Routing to web_autonomous_agent because the live browser is already open")
+                state['task_type'] = 'web_autonomous'
+                state['confidence'] = 0.95
+                state['routing_reason'] = (
+                    "A live browser session is already open and the new message looks page-relative."
+                )
+                state['agent_path'].append('router')
+                return state
+
             # Classify with user context + conversation history
             result = router_agent.classify_task(
                 user_message=state['user_message'],
@@ -519,52 +551,158 @@ class LangGraphOrchestrator:
         return state
     
     async def _web_agent_node(self, state: AgentState) -> AgentState:
-        """✅ NEW: Web specialist"""
+        """Web specialist — real internet search, fetch, and LLM summarisation."""
         logger.info("🌐 Web Agent processing...")
-        
+
         try:
-            # Build Message objects
+            # ── Step 1: DuckDuckGo search ──────────────────────────────────
+            search_results = []
+            try:
+                from duckduckgo_search import DDGS
+                with DDGS() as ddgs:
+                    raw = list(ddgs.text(
+                        state['user_message'],
+                        region="in-en",
+                        max_results=5,
+                    ))
+                search_results = [
+                    {
+                        "title": r.get("title", ""),
+                        "url": r.get("href", r.get("link", "")),
+                        "snippet": r.get("body", r.get("snippet", ""))[:400],
+                    }
+                    for r in raw
+                ]
+                logger.info(f"🔍 DDG returned {len(search_results)} results")
+            except ImportError:
+                logger.warning("⚠️ duckduckgo-search not installed — falling back to LLM only.")
+            except Exception as ddg_err:
+                logger.warning(f"⚠️ DDG search failed: {ddg_err}")
+
+            # ── Step 2: Fetch page content for top 2 results ───────────────
+            fetched_pages = []
+            if search_results:
+                try:
+                    import httpx
+                    async with httpx.AsyncClient(
+                        timeout=8.0,
+                        follow_redirects=True,
+                        headers={
+                            "User-Agent": (
+                                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                "Chrome/124.0.0.0 Safari/537.36"
+                            )
+                        },
+                    ) as client:
+                        for result in search_results[:2]:
+                            url = result.get("url", "")
+                            if not url:
+                                continue
+                            try:
+                                resp = await client.get(url)
+                                resp.raise_for_status()
+                                # Strip HTML tags simply
+                                import re as _re
+                                text = _re.sub(r"<[^>]+>", " ", resp.text)
+                                text = _re.sub(r"\s{3,}", "\n\n", text).strip()
+                                fetched_pages.append({
+                                    "url": url,
+                                    "title": result.get("title", ""),
+                                    "content": text[:4000],
+                                })
+                            except Exception as fetch_err:
+                                logger.debug(f"Fetch skipped {url}: {fetch_err}")
+                    logger.info(f"📄 Fetched {len(fetched_pages)} pages")
+                except ImportError:
+                    logger.warning("⚠️ httpx not installed — using snippets only.")
+                except Exception as http_err:
+                    logger.warning(f"⚠️ HTTP fetch error: {http_err}")
+
+            # ── Step 3: Build LLM context ──────────────────────────────────
+            context_parts = []
+
+            if search_results:
+                context_parts.append("## Search Results\n")
+                for i, r in enumerate(search_results, 1):
+                    context_parts.append(
+                        f"{i}. **{r['title']}** ({r['url']})\n   {r['snippet']}\n"
+                    )
+
+            if fetched_pages:
+                context_parts.append("\n## Full Page Content\n")
+                for page in fetched_pages:
+                    context_parts.append(
+                        f"### {page['title']}\nURL: {page['url']}\n\n{page['content'][:3000]}\n"
+                    )
+
+            web_context = "\n".join(context_parts) if context_parts else ""
+
+            # ── Step 4: LLM synthesis ──────────────────────────────────────
             messages = []
-            
+
             if state.get('user_context'):
                 messages.append(Message(
                     role=MessageRole.SYSTEM,
-                    content=state['user_context']
+                    content=state['user_context'],
                 ))
-            
+
+            system_content = (
+                "You are a Web Research Agent. You have searched the internet for the user's query "
+                "and retrieved the following results. Use this information to give a comprehensive, "
+                "accurate, and concise answer. Always cite the source URLs.\n\n"
+            )
+            if web_context:
+                system_content += web_context
+            else:
+                system_content += (
+                    "NOTE: Live search was unavailable. Answer based on your training data "
+                    "and clearly indicate the information may not be up-to-date."
+                )
+
             messages.append(Message(
                 role=MessageRole.SYSTEM,
-                content="You are a Web Agent that can scrape websites and fetch data. Provide clear instructions or results."
+                content=system_content,
             ))
-            
+
             for msg in state.get('conversation_history', [])[-3:]:
                 if isinstance(msg, dict):
                     role = MessageRole.USER if msg.get('role') == 'user' else MessageRole.ASSISTANT
                     messages.append(Message(role=role, content=msg.get('content', '')))
-            
+
             messages.append(Message(
                 role=MessageRole.USER,
-                content=state['user_message']
+                content=state['user_message'],
             ))
-            
+
             result = await self.llm.generate_response(messages)
-            
+
             state['current_output'] = result['response']
             state['final_output'] = result['response']
             state['agent_path'].append('web_specialist')
             state['success'] = True
-            
-            logger.info("✅ Web response complete")
-        
+            state['metadata'] = {
+                **state.get('metadata', {}),
+                'web_search_used': bool(search_results),
+                'web_results_count': len(search_results),
+                'web_pages_fetched': len(fetched_pages),
+            }
+
+            logger.info(
+                f"✅ Web response complete "
+                f"({len(search_results)} results, {len(fetched_pages)} pages fetched)"
+            )
+
         except Exception as e:
             logger.error(f"❌ Web agent error: {e}")
-            state['current_output'] = f"Web task error: {str(e)}"
+            state['current_output'] = f"Web search error: {str(e)}"
             state['final_output'] = state['current_output']
             state['errors'].append(f"Web agent error: {str(e)}")
             state['success'] = False
-        
+
         return state
-    
+
+
     async def _web_autonomous_agent_node(self, state: AgentState) -> AgentState:
         """
         Autonomous Web Agent — Perplexity Comet-style browser automation.
@@ -583,7 +721,7 @@ class LangGraphOrchestrator:
         user_message = state['user_message']
 
         def _live_browser_looks_failed(actions: list, response_text: str) -> bool:
-            """True if Playwright on the host failed; backend should use headless fallback."""
+            """True if the host live-browser runtime failed and headless fallback should take over."""
             blob = (response_text or "").lower()
             phrases = (
                 "failed to open browser",
@@ -598,11 +736,26 @@ class LangGraphOrchestrator:
             )
             if any(p in blob for p in phrases):
                 return True
-            opens = [a for a in (actions or []) if a.get("tool") == "open_browser"]
+
+            fatal_codes = {"browser_launch_failed", "connection_failed", "playwright_unavailable"}
+            action_error_codes = {
+                str(a.get("error_code"))
+                for a in (actions or [])
+                if a.get("error_code")
+            }
+            if action_error_codes & fatal_codes:
+                return True
+
+            opens = [
+                a for a in (actions or [])
+                if a.get("tool") in {"open_browser", "browser"}
+                and (a.get("tool") != "browser" or (a.get("args") or {}).get("command") in {"start", "open", "navigate"})
+            ]
             if opens:
                 if any(a.get("success") for a in opens):
                     return False
-                return True
+                if any(str(a.get("error_code")) in fatal_codes for a in opens):
+                    return True
             return False
 
         try:
@@ -612,15 +765,59 @@ class LangGraphOrchestrator:
 
             if desktop_available:
                 logger.info("🖥️ Desktop Agent available — using LIVE browser")
+
+                # ── Build conversation context block from recent history ────
+                # This fixes Bug 2: instead of "Open the browser and complete
+                # this web task: {msg}", we send the actual user message with
+                # full conversation context so follow-up commands work.
+                conversation_history = state.get('conversation_history', [])
+                recent_msgs = [
+                    msg for msg in conversation_history
+                    if isinstance(msg, dict) and msg.get('role') in ('user', 'assistant', 'model')
+                ][-6:]  # Last 6 messages for context
+
+                context_lines = ["Recent conversation:"]
+                for msg in recent_msgs:
+                    role = msg.get('role', 'user')
+                    content = str(msg.get('content', ''))[:150]
+                    context_lines.append(f"  {role}: {content}")
+
+                context_block = "\n".join(context_lines) if len(recent_msgs) > 1 else None
+
+                # Use user_id as session_id for per-user browser state isolation
+                session_id = user_id or "default"
+
                 result = await desktop_bridge.execute_nl_command(
-                    f"Open the browser and complete this web task: {user_message}",
-                    timeout_seconds=120,
+                    user_message,          # <— just the raw user message, not wrapped
+                    timeout_seconds=300,
+                    conversation_context=context_block,
+                    session_id=session_id,
                 )
 
                 actions = result.get("actions_taken", [])
                 response_text = result.get("response", "")
+                browser_state = self._normalize_browser_state(result.get("browser_state"))
+                state['browser_state'] = browser_state
+                state['web_current_url'] = browser_state.get("current_url", "")
 
                 if _live_browser_looks_failed(actions, response_text):
+                    if not self._allows_safe_headless_browser_fallback(user_message):
+                        state['current_output'] = (
+                            "The live browser on your computer is unavailable, and I will not silently "
+                            "downgrade this sensitive browser task to headless mode.\n\n"
+                            "Please make sure the Desktop Agent live browser is available, then try again."
+                        )
+                        state['final_output'] = state['current_output']
+                        state['agent_path'].append('web_autonomous_agent')
+                        state['success'] = False
+                        state['metadata'] = {
+                            **state.get('metadata', {}),
+                            'browser_state': browser_state,
+                            'web_autonomous': True,
+                            'web_live_browser': True,
+                            'web_fallback_blocked': True,
+                        }
+                        return state
                     logger.warning(
                         "Live Playwright on the host failed — falling back to headless web agent in Docker"
                     )
@@ -645,6 +842,14 @@ class LangGraphOrchestrator:
                         "`pip install playwright` then `python -m playwright install chromium`, "
                         "then restart `desktop_agent.py`.\n\n"
                     )
+                    headless_browser_state = self._normalize_browser_state({
+                        "is_open": False,
+                        "driver": "headless",
+                        "transport": "headless",
+                        "current_url": headless.get('current_url', ''),
+                        "current_title": headless.get('current_title', ''),
+                    })
+                    state['browser_state'] = headless_browser_state
                     state['current_output'] = note + (headless.get('output') or '')
                     state['final_output'] = state['current_output']
                     state['agent_path'].append('web_autonomous_agent')
@@ -655,12 +860,69 @@ class LangGraphOrchestrator:
                     state['web_permission_needed'] = headless.get('permission_needed') or {}
                     state['metadata'] = {
                         **state.get('metadata', {}),
+                        'browser_state': headless_browser_state,
                         'web_screenshots': headless.get('screenshots', [])[-1:],
                         'web_actions_count': len(headless.get('actions_taken', [])),
                         'web_current_url': headless.get('current_url', ''),
                         'web_autonomous': True,
                         'web_live_browser': False,
                         'web_fallback_headless': True,
+                    }
+                    return state
+
+                # ── Handle ask_user_question clarification ────────────────
+                if result.get("user_input_required"):
+                    input_request = result.get("input_request") or {}
+                    browser_input_state = {
+                        "status": "required",
+                        "desktop_request_id": input_request.get("request_id", ""),
+                        "field_description": input_request.get("field_description", "input"),
+                        "input_type": input_request.get("input_type", "text"),
+                        "reason": input_request.get("reason", ""),
+                        "task_type": "web_autonomous",
+                    }
+                    state['current_output'] = self._build_browser_input_prompt(browser_input_state)
+                    state['final_output'] = state['current_output']
+                    state['agent_path'].append('web_autonomous_agent')
+                    state['success'] = False
+                    state['metadata'] = {
+                        **state.get('metadata', {}),
+                        '_browser_input_state': browser_input_state,
+                        'browser_state': browser_state,
+                        'web_autonomous': True,
+                        'web_live_browser': True,
+                    }
+                    return state
+
+                if result.get("requires_clarification"):
+                    logger.info("❓ Agent needs clarification from user")
+                    clarif_question = result.get("question", "")
+                    clarif_options = result.get("options", [])
+                    clarif_context = result.get("context", "")
+
+                    state['current_output'] = clarif_question
+                    state['final_output'] = clarif_question
+                    state['agent_path'].append('web_autonomous_agent')
+                    state['success'] = False
+                    clarification_state = {
+                        "status": "required",
+                        "question": clarif_question,
+                        "options": [
+                            {"index": i + 1, "label": opt}
+                            for i, opt in enumerate(clarif_options)
+                        ],
+                        "reason": clarif_context,
+                        "task_type": "web_autonomous",
+                    }
+                    state['metadata'] = {
+                        **state.get('metadata', {}),
+                        '_clarification_state': clarification_state,
+                        'browser_state': browser_state,
+                        'requires_clarification': True,
+                        'clarification_question': clarif_question,
+                        'clarification_options': clarif_options,
+                        'web_autonomous': True,
+                        'web_live_browser': True,
                     }
                     return state
 
@@ -692,6 +954,7 @@ class LangGraphOrchestrator:
 
                     state['metadata'] = {
                         **state.get('metadata', {}),
+                        'browser_state': browser_state,
                         'web_autonomous': True,
                         'web_live_browser': True,
                         'web_sensitive_blocked': True,
@@ -710,13 +973,15 @@ class LangGraphOrchestrator:
                 state['success'] = result.get("success", False)
                 state['web_screenshots'] = screenshots
                 state['web_actions'] = actions
-                state['web_current_url'] = ""
+                state['web_current_url'] = browser_state.get("current_url", "")
                 state['web_permission_needed'] = {}
 
                 state['metadata'] = {
                     **state.get('metadata', {}),
+                    'browser_state': browser_state,
                     'web_screenshots': screenshots[-1:] if screenshots else [],
                     'web_actions_count': len(actions),
+                    'web_current_url': browser_state.get("current_url", ""),
                     'web_autonomous': True,
                     'web_live_browser': True,
                 }
@@ -735,6 +1000,23 @@ class LangGraphOrchestrator:
                 return state
 
             logger.info("🐳 Desktop Agent unavailable — falling back to headless browser")
+            if not self._allows_safe_headless_browser_fallback(user_message):
+                state['current_output'] = (
+                    "The live browser is unavailable, and this browser task is sensitive, so I will not "
+                    "silently downgrade it to headless mode.\n\n"
+                    "Please start the Desktop Agent browser runtime and try again."
+                )
+                state['final_output'] = state['current_output']
+                state['agent_path'].append('web_autonomous_agent')
+                state['success'] = False
+                state['metadata'] = {
+                    **state.get('metadata', {}),
+                    'browser_state': {},
+                    'web_autonomous': True,
+                    'web_live_browser': False,
+                    'web_fallback_blocked': True,
+                }
+                return state
             from app.services.web_agent_service import web_agent_service
 
             conversation_history = state.get('conversation_history', [])
@@ -759,9 +1041,17 @@ class LangGraphOrchestrator:
             state['web_actions'] = result.get('actions_taken', [])
             state['web_current_url'] = result.get('current_url', '')
             state['web_permission_needed'] = result.get('permission_needed') or {}
+            state['browser_state'] = self._normalize_browser_state({
+                "is_open": False,
+                "driver": "headless",
+                "transport": "headless",
+                "current_url": result.get('current_url', ''),
+                "current_title": result.get('current_title', ''),
+            })
 
             state['metadata'] = {
                 **state.get('metadata', {}),
+                'browser_state': state['browser_state'],
                 'web_screenshots': result.get('screenshots', [])[-1:],
                 'web_actions_count': len(result.get('actions_taken', [])),
                 'web_current_url': result.get('current_url', ''),
@@ -1581,6 +1871,7 @@ EXPLANATION: Brief description""",
             'web_actions': [],
             'web_current_url': '',
             'web_permission_needed': {},
+            'browser_state': {},
         }
         if message_callback:
             initial_state['metadata']['_message_callback'] = message_callback
@@ -1593,6 +1884,74 @@ EXPLANATION: Brief description""",
         if user_id.startswith("web_"):
             return "web"
         return "api"
+
+    def _looks_page_relative_follow_up(self, user_message: str) -> bool:
+        """Detect follow-up commands that should stay attached to an open browser session."""
+        message = (user_message or "").strip().lower()
+        if not message:
+            return False
+
+        direct_phrases = (
+            "click ", "type ", "fill ", "submit", "press ", "scroll", "continue",
+            "next", "back", "go back", "open this", "open that", "open the first",
+            "open the second", "select ", "choose ", "search here", "search on this page",
+            "in the browser", "on this page", "on the page", "on that site", "log in",
+            "login", "sign in", "sign up", "enter ", "paste ", "hover ", "drag ",
+        )
+        if any(phrase in message for phrase in direct_phrases):
+            return True
+
+        contextual_terms = ("this page", "that page", "this site", "that site", "the page", "the browser")
+        action_terms = ("click", "type", "fill", "submit", "open", "continue", "search", "scroll", "press")
+        return any(term in message for term in contextual_terms) and any(
+            action in message for action in action_terms
+        )
+
+    def _is_sensitive_browser_task(self, user_message: str) -> bool:
+        """Block unsafe silent headless fallback for sensitive website tasks."""
+        message = (user_message or "").lower()
+        sensitive_terms = (
+            "login", "log in", "sign in", "sign up", "password", "otp", "captcha",
+            "checkout", "payment", "pay ", "credit card", "debit card", "cvv",
+            "billing", "bank", "purchase", "buy ", "order ", "book ", "submit form",
+            "create account", "register", "account settings", "personal details",
+        )
+        return any(term in message for term in sensitive_terms)
+
+    def _allows_safe_headless_browser_fallback(self, user_message: str) -> bool:
+        """Allow headless fallback only for clearly non-sensitive browse/read tasks."""
+        message = (user_message or "").lower()
+        if self._is_sensitive_browser_task(message):
+            return False
+        safe_terms = (
+            "search", "look up", "research", "find", "open", "visit", "read",
+            "summarize", "browse", "compare", "show me", "what is", "latest",
+        )
+        return any(term in message for term in safe_terms)
+
+    def _build_browser_input_prompt(self, browser_input_state: Dict[str, Any]) -> str:
+        field_description = browser_input_state.get("field_description", "the requested input")
+        reason = browser_input_state.get("reason", "")
+        prompt = f"Browser input required: please provide {field_description}."
+        if reason:
+            prompt += f"\n\nReason: {reason}"
+        return prompt
+
+    def _normalize_browser_state(self, browser_state: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        state = browser_state or {}
+        return {
+            "is_open": bool(
+                state.get("is_open", state.get("running", False))
+            ),
+            "profile": state.get("profile", ""),
+            "driver": state.get("driver", ""),
+            "transport": state.get("transport", ""),
+            "current_url": state.get("current_url", ""),
+            "current_title": state.get("current_title", ""),
+            "tab_id": state.get("tab_id", ""),
+            "last_snapshot_mode": state.get("last_snapshot_mode", ""),
+            "last_action_summary": state.get("last_action_summary", ""),
+        }
 
     async def _emit_progress(
         self,
@@ -1953,6 +2312,7 @@ EXPLANATION: Brief description""",
             'web_screenshots': state.get('web_screenshots', []),
             'web_actions': state.get('web_actions', []),
             'web_current_url': state.get('web_current_url', ''),
+            'browser_state': state.get('browser_state', {}),
             'desktop_action': state.get('desktop_action', ''),
             'desktop_result': state.get('desktop_result', {}),
             'desktop_plan': safe_metadata.get('desktop_plan', {}),
@@ -2009,11 +2369,12 @@ EXPLANATION: Brief description""",
         state: AgentState,
         plan: ExecutionPlan,
         message_callback: Optional[Callable] = None,
-    ) -> tuple[AgentState, List[ExecutionTraceEvent], Dict[str, Any], Dict[str, Any]]:
+    ) -> tuple[AgentState, List[ExecutionTraceEvent], Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
         """Run the explicit plan, capturing step traces and orchestrator-managed handoffs."""
         execution_trace: List[ExecutionTraceEvent] = []
         approval_state = {"status": "not_required", "reason": ""}
         clarification_state = {"status": "not_required", "reason": "", "options": []}
+        browser_input_state = {"status": "not_required", "reason": "", "field_description": "", "input_type": "text"}
         completed_steps: set[str] = set()
         step_index = 0
         state['metadata'] = {
@@ -2086,9 +2447,13 @@ EXPLANATION: Brief description""",
 
             specialist_approval_state = state.get('metadata', {}).pop('_approval_state', {}) or {}
             specialist_clarification_state = state.get('metadata', {}).pop('_clarification_state', {}) or {}
+            specialist_browser_input_state = state.get('metadata', {}).pop('_browser_input_state', {}) or {}
             if specialist_clarification_state.get("status") == "required":
                 step.status = "blocked"
                 clarification_state = specialist_clarification_state
+            elif specialist_browser_input_state.get("status") == "required":
+                step.status = "blocked"
+                browser_input_state = specialist_browser_input_state
             elif specialist_approval_state.get("status") == "required":
                 step.status = "blocked"
                 approval_state = specialist_approval_state
@@ -2134,6 +2499,18 @@ EXPLANATION: Brief description""",
                     agent_type=step.agent_type,
                     clarification_state=clarification_state,
                 )
+                break
+
+            if browser_input_state.get("status") == "required":
+                execution_trace.append(ExecutionTraceEvent(
+                    event_type="browser_input_required",
+                    phase="execution",
+                    step_id=step.step_id,
+                    agent_type=step.agent_type,
+                    success=False,
+                    message=browser_input_state.get("reason", self._build_browser_input_prompt(browser_input_state)),
+                    data={"browser_input_state": browser_input_state},
+                ))
                 break
 
             if approval_state.get("status") == "required":
@@ -2208,7 +2585,7 @@ EXPLANATION: Brief description""",
 
             step_index += 1
 
-        return state, execution_trace, approval_state, clarification_state
+        return state, execution_trace, approval_state, clarification_state, browser_input_state
 
     async def _persist_interaction(
         self,
@@ -2222,6 +2599,8 @@ EXPLANATION: Brief description""",
         artifacts: Optional[Dict[str, Any]] = None,
         approval_state: Optional[Dict[str, Any]] = None,
         clarification_state: Optional[Dict[str, Any]] = None,
+        browser_input_state: Optional[Dict[str, Any]] = None,
+        browser_state: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Persist the user request and assistant response once per orchestrated turn."""
         try:
@@ -2248,6 +2627,8 @@ EXPLANATION: Brief description""",
                     'artifacts': artifacts or {},
                     'approval_state': approval_state or {},
                     'clarification_state': clarification_state or {},
+                    'browser_input_state': browser_input_state,
+                    'browser_state': browser_state or {},
                 },
             )
             self.memory_service.save_conversation_exchange(
@@ -2268,7 +2649,13 @@ EXPLANATION: Brief description""",
                     'success': success,
                 }
             )
-            if plan and plan.workflow_key and (approval_state or {}).get('status') != 'required' and (clarification_state or {}).get('status') != 'required':
+            if (
+                plan
+                and plan.workflow_key
+                and (approval_state or {}).get('status') != 'required'
+                and (clarification_state or {}).get('status') != 'required'
+                and (browser_input_state or {}).get('status') != 'required'
+            ):
                 self.memory_service.record_workflow_run(
                     envelope.user_id,
                     plan.workflow_key,
@@ -2331,6 +2718,8 @@ EXPLANATION: Brief description""",
             'execution_trace': [event.model_dump() for event in execution_trace],
             'approval_state': {'status': 'not_required', 'reason': '', 'affected_steps': []},
             'clarification_state': clarification_state,
+            'browser_input_state': None,
+            'browser_state': (envelope.metadata or {}).get("browser_state", {}),
             'artifacts': {},
             'metadata': {
                 'channel': envelope.channel,
@@ -2338,6 +2727,7 @@ EXPLANATION: Brief description""",
                 'risk_level': 'medium',
                 'iterations': 0,
                 'errors': [],
+                'browser_state': (envelope.metadata or {}).get("browser_state", {}),
             },
         }
         await self._persist_interaction(
@@ -2351,6 +2741,8 @@ EXPLANATION: Brief description""",
             artifacts={},
             approval_state=response['approval_state'],
             clarification_state=clarification_state,
+            browser_input_state=None,
+            browser_state=response['browser_state'],
         )
         await self._emit_progress(
             message_callback,
@@ -2359,6 +2751,289 @@ EXPLANATION: Brief description""",
             result=response,
         )
         return response
+
+    async def _build_browser_input_response(
+        self,
+        *,
+        envelope: TaskEnvelope,
+        browser_input_state: Dict[str, Any],
+        browser_state: Dict[str, Any],
+        message_callback: Optional[Callable],
+    ) -> Dict[str, Any]:
+        output = self._build_browser_input_prompt(browser_input_state)
+        execution_trace = [
+            ExecutionTraceEvent(
+                event_type="browser_input_required",
+                phase="analysis",
+                message=browser_input_state.get("reason", output),
+                agent_type="web_autonomous",
+                success=False,
+                data={
+                    "browser_input_state": browser_input_state,
+                    "browser_state": browser_state,
+                },
+            )
+        ]
+        response = {
+            'success': False,
+            'output': output,
+            'task_type': 'web_autonomous',
+            'confidence': 1.0,
+            'agent_path': ['web_autonomous_agent', 'browser_input_pending'],
+            'code': None,
+            'files': None,
+            'language': None,
+            'file_path': '',
+            'project_structure': None,
+            'main_file': None,
+            'project_type': '',
+            'server_running': False,
+            'server_url': '',
+            'server_port': None,
+            'plan': None,
+            'execution_trace': [event.model_dump() for event in execution_trace],
+            'approval_state': {'status': 'not_required', 'reason': '', 'affected_steps': []},
+            'clarification_state': {'status': 'not_required', 'reason': '', 'options': []},
+            'browser_input_state': browser_input_state,
+            'browser_state': browser_state,
+            'artifacts': {
+                'web_current_url': browser_state.get('current_url', ''),
+                'browser_state': browser_state,
+            },
+            'metadata': {
+                'channel': envelope.channel,
+                'routing_reason': 'Waiting for browser input to resume the live browser task.',
+                'risk_level': 'medium',
+                'iterations': 0,
+                'errors': [],
+                'web_current_url': browser_state.get('current_url', ''),
+                'browser_state': browser_state,
+                'web_autonomous': True,
+                'web_live_browser': True,
+            },
+        }
+        await self._persist_interaction(
+            envelope=envelope,
+            response_text=output,
+            task_type='web_autonomous',
+            agent_path=response['agent_path'],
+            success=False,
+            execution_trace=execution_trace,
+            plan=None,
+            artifacts=response['artifacts'],
+            approval_state=response['approval_state'],
+            clarification_state=response['clarification_state'],
+            browser_input_state=browser_input_state,
+            browser_state=browser_state,
+        )
+        await self._emit_progress(
+            message_callback,
+            "question_for_user",
+            output,
+            browser_input_state=browser_input_state,
+        )
+        await self._emit_progress(
+            message_callback,
+            "final",
+            output[:500],
+            result=response,
+        )
+        return response
+
+    async def _build_browser_result_response(
+        self,
+        *,
+        envelope: TaskEnvelope,
+        desktop_result: Dict[str, Any],
+        browser_state: Dict[str, Any],
+        message_callback: Optional[Callable],
+        user_message_for_memory: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        output = desktop_result.get("response") or desktop_result.get("error") or "Browser task completed."
+        success = bool(desktop_result.get("success", False))
+        actions = desktop_result.get("actions_taken", []) or []
+        execution_trace = [
+            ExecutionTraceEvent(
+                event_type="browser_resumed",
+                phase="execution",
+                message=output[:500],
+                agent_type="web_autonomous",
+                success=success,
+                data={"browser_state": browser_state, "actions_taken": actions},
+            )
+        ]
+        response = {
+            'success': success,
+            'output': output,
+            'task_type': 'web_autonomous',
+            'confidence': 1.0,
+            'agent_path': ['web_autonomous_agent'],
+            'code': None,
+            'files': None,
+            'language': None,
+            'file_path': '',
+            'project_structure': None,
+            'main_file': None,
+            'project_type': '',
+            'server_running': False,
+            'server_url': '',
+            'server_port': None,
+            'plan': None,
+            'execution_trace': [event.model_dump() for event in execution_trace],
+            'approval_state': {'status': 'not_required', 'reason': '', 'affected_steps': []},
+            'clarification_state': {'status': 'not_required', 'reason': '', 'options': []},
+            'browser_input_state': None,
+            'browser_state': browser_state,
+            'artifacts': {
+                'web_current_url': browser_state.get('current_url', ''),
+                'web_actions': actions,
+                'browser_state': browser_state,
+            },
+            'metadata': {
+                'channel': envelope.channel,
+                'routing_reason': 'Continued the live browser task using the pending browser input.',
+                'risk_level': 'medium',
+                'iterations': 0,
+                'errors': [desktop_result.get('error')] if desktop_result.get('error') else [],
+                'web_actions_count': len(actions),
+                'web_current_url': browser_state.get('current_url', ''),
+                'browser_state': browser_state,
+                'web_autonomous': True,
+                'web_live_browser': browser_state.get('transport', '') != 'headless',
+            },
+        }
+        await self._persist_interaction(
+            envelope=TaskEnvelope(
+                user_message=user_message_for_memory or envelope.user_message,
+                user_id=envelope.user_id,
+                conversation_id=envelope.conversation_id,
+                channel=envelope.channel,
+                metadata=envelope.metadata,
+            ),
+            response_text=output,
+            task_type='web_autonomous',
+            agent_path=response['agent_path'],
+            success=success,
+            execution_trace=execution_trace,
+            plan=None,
+            artifacts=response['artifacts'],
+            approval_state=response['approval_state'],
+            clarification_state=response['clarification_state'],
+            browser_input_state=None,
+            browser_state=browser_state,
+        )
+        await self._emit_progress(
+            message_callback,
+            "final",
+            output[:500],
+            result=response,
+        )
+        return response
+
+    async def _maybe_resume_pending_browser_input(
+        self,
+        *,
+        user_message: str,
+        user_id: str,
+        conversation_id: str,
+        message_callback: Optional[Callable],
+    ) -> Optional[Dict[str, Any]]:
+        from app.services.browser_input_service import browser_input_service
+        from app.services.clarification_service import clarification_service
+        from app.skills.desktop_bridge import desktop_bridge
+
+        pending = browser_input_service.get_pending_request(
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )
+        if not pending:
+            return None
+
+        channel = pending.channel or self._detect_channel(user_id)
+        sanitized_input_message = f"Provided {pending.field_description}"
+        envelope = TaskEnvelope(
+            user_message=sanitized_input_message,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            channel=channel,
+            metadata={"browser_input_for": pending.field_description},
+        )
+
+        resumed = await desktop_bridge.provide_input(
+            request_id=pending.desktop_request_id,
+            value=user_message,
+        )
+        browser_state = self._normalize_browser_state(resumed.get("browser_state"))
+
+        browser_input_service.resolve(
+            pending.browser_input_id,
+            result={"success": resumed.get("success", False)},
+            status="resolved",
+        )
+        browser_input_service.remove(pending.browser_input_id)
+
+        if resumed.get("user_input_required"):
+            input_request = resumed.get("input_request") or {}
+            next_pending = browser_input_service.create_request(
+                desktop_request_id=input_request.get("request_id", ""),
+                user_id=user_id,
+                conversation_id=conversation_id,
+                channel=channel,
+                field_description=input_request.get("field_description", "input"),
+                input_type=input_request.get("input_type", "text"),
+                reason=input_request.get("reason", ""),
+            )
+            browser_input_state = {
+                "status": "required",
+                "browser_input_id": next_pending.browser_input_id,
+                "field_description": next_pending.field_description,
+                "input_type": next_pending.input_type,
+                "reason": next_pending.reason,
+                "channel": next_pending.channel,
+            }
+            return await self._build_browser_input_response(
+                envelope=envelope,
+                browser_input_state=browser_input_state,
+                browser_state=browser_state,
+                message_callback=message_callback,
+            )
+
+        if resumed.get("requires_clarification"):
+            clarification_state = {
+                "status": "required",
+                "reason": resumed.get("question", "") or resumed.get("response", ""),
+                "question": resumed.get("question", ""),
+                "options": [
+                    {"index": i + 1, "label": opt}
+                    for i, opt in enumerate(resumed.get("options", []) or [])
+                ],
+                "task_type": "web_autonomous",
+            }
+            clarification_request = clarification_service.create_request(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                user_message=sanitized_input_message,
+                question=clarification_state.get("question") or clarification_state.get("reason", "Clarification required."),
+                options=clarification_state.get("options", []),
+                channel=channel,
+                task_type="web_autonomous",
+                metadata={"resume_context": {"browser_state": browser_state}},
+            )
+            clarification_state["clarification_id"] = clarification_request.clarification_id
+            return await self._build_clarification_response(
+                envelope=envelope,
+                clarification_state=clarification_state,
+                message_callback=message_callback,
+                prompt_prefix="I still need one more clarification before continuing the browser task.",
+            )
+
+        return await self._build_browser_result_response(
+            envelope=envelope,
+            desktop_result=resumed,
+            browser_state=browser_state,
+            message_callback=message_callback,
+            user_message_for_memory=sanitized_input_message,
+        )
 
     async def _maybe_resume_pending_clarification(
         self,
@@ -2447,11 +3122,24 @@ EXPLANATION: Brief description""",
         approval_override: bool = False,
         resume_context: Optional[Dict[str, Any]] = None,
         interaction_user_message: Optional[str] = None,
+        extra_metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Process a request through the unified planner/executor architecture."""
         logger.info(f"🚀 Processing: '{user_message[:50]}...'")
 
+        # Infer message_callback from extra_metadata if not provided directly.
+        if extra_metadata and not message_callback:
+            message_callback = extra_metadata.get('_message_callback')
+
         if not resume_context:
+            browser_resume_result = await self._maybe_resume_pending_browser_input(
+                user_message=user_message,
+                user_id=user_id,
+                conversation_id=conversation_id,
+                message_callback=message_callback,
+            )
+            if browser_resume_result is not None:
+                return browser_resume_result
             clarification_result = await self._maybe_resume_pending_clarification(
                 user_message=user_message,
                 user_id=user_id,
@@ -2472,6 +3160,9 @@ EXPLANATION: Brief description""",
         )
         state['metadata']['approval_override'] = approval_override
         state['metadata']['_resume_context'] = resume_context or {}
+        # Inject caller-provided metadata (callbacks, queues, etc.)
+        if extra_metadata:
+            state['metadata'].update(extra_metadata)
         envelope = TaskEnvelope(
             user_message=user_message,
             user_id=user_id,
@@ -2533,12 +3224,13 @@ EXPLANATION: Brief description""",
                 "reason": "",
                 "options": [],
             }
+            browser_input_state = None
 
             if analysis.blocked:
                 state['success'] = False
                 state['final_output'] = analysis.blocked_reason
             else:
-                state, execution_events, approval_state, clarification_state = await self._execute_plan(
+                state, execution_events, approval_state, clarification_state, browser_input_state = await self._execute_plan(
                     state,
                     plan,
                     message_callback=message_callback,
@@ -2562,7 +3254,38 @@ EXPLANATION: Brief description""",
                         },
                     }
 
-                if approval_state["status"] == "required":
+                if browser_input_state and browser_input_state.get("status") == "required":
+                    from app.services.browser_input_service import browser_input_service
+
+                    browser_input_request = browser_input_service.create_request(
+                        desktop_request_id=browser_input_state.get("desktop_request_id", ""),
+                        user_id=envelope.user_id,
+                        conversation_id=envelope.conversation_id,
+                        channel=envelope.channel,
+                        field_description=browser_input_state.get("field_description", "input"),
+                        input_type=browser_input_state.get("input_type", "text"),
+                        reason=browser_input_state.get("reason", ""),
+                        metadata={
+                            "browser_state": state.get('browser_state', {}),
+                        },
+                    )
+                    browser_input_state = {
+                        "status": "required",
+                        "browser_input_id": browser_input_request.browser_input_id,
+                        "field_description": browser_input_request.field_description,
+                        "input_type": browser_input_request.input_type,
+                        "reason": browser_input_request.reason,
+                        "channel": browser_input_request.channel,
+                    }
+                    state['success'] = False
+                    state['final_output'] = self._build_browser_input_prompt(browser_input_state)
+                    await self._emit_progress(
+                        message_callback,
+                        "question_for_user",
+                        state['final_output'],
+                        browser_input_state=browser_input_state,
+                    )
+                elif approval_state["status"] == "required":
                     from app.services.approval_service import approval_service
 
                     approval_request = approval_service.create_request(
@@ -2633,6 +3356,8 @@ EXPLANATION: Brief description""",
                 'execution_trace': [event.model_dump() for event in execution_trace],
                 'approval_state': approval_state,
                 'clarification_state': clarification_state,
+                'browser_input_state': browser_input_state,
+                'browser_state': state.get('browser_state', {}),
                 'artifacts': artifacts,
                 'metadata': {
                     'channel': envelope.channel,
@@ -2643,6 +3368,7 @@ EXPLANATION: Brief description""",
                     'web_screenshots': state.get('web_screenshots', []),
                     'web_actions_count': len(state.get('web_actions', [])),
                     'web_current_url': state.get('web_current_url', ''),
+                    'browser_state': state.get('browser_state', {}),
                     **safe_metadata,
                 },
             }
@@ -2658,6 +3384,8 @@ EXPLANATION: Brief description""",
                 artifacts=artifacts,
                 approval_state=approval_state,
                 clarification_state=clarification_state,
+                browser_input_state=browser_input_state,
+                browser_state=state.get('browser_state', {}),
             )
             await self._emit_progress(
                 message_callback,
@@ -2681,6 +3409,8 @@ EXPLANATION: Brief description""",
                 'execution_trace': [],
                 'approval_state': {'status': 'not_required', 'reason': '', 'affected_steps': []},
                 'clarification_state': {'status': 'not_required', 'reason': '', 'options': []},
+                'browser_input_state': None,
+                'browser_state': {},
                 'artifacts': {},
                 'metadata': {'error': str(e)},
             }

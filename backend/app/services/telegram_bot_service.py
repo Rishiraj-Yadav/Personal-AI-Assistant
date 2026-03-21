@@ -212,6 +212,29 @@ class TelegramBotService:
                 payload["reply_markup"] = reply_markup
             await self._api_post("sendMessage", payload=payload)
 
+    async def _send_browser_input_warning(
+        self,
+        *,
+        chat_id: int,
+        browser_input_state: dict,
+        reply_to_message_id: Optional[int] = None,
+        thread_id: Optional[int] = None,
+    ) -> None:
+        field_description = browser_input_state.get("field_description", "the requested input")
+        input_reason = browser_input_state.get("reason", "")
+        warning = (
+            f"Reply in this same chat to continue the browser task.\n"
+            f"Needed input: {field_description}.\n"
+            f"{input_reason}\n\n"
+            "Warning: your reply will remain in Telegram chat history."
+        ).strip()
+        await self._send_text_response(
+            chat_id=chat_id,
+            text=warning,
+            reply_to_message_id=reply_to_message_id,
+            thread_id=thread_id,
+        )
+
     async def _answer_callback_query(self, callback_query_id: str, text: str) -> None:
         try:
             await self._api_post(
@@ -245,14 +268,8 @@ class TelegramBotService:
         await self._api_post("sendPhoto", form=form)
 
     async def _process_message(self, msg: dict) -> None:
-        if not self._should_process(msg):
-            return
-
         text = msg.get("text") or msg.get("caption") or ""
         content = self._clean_content(text)
-        if not content:
-            return
-
         chat = msg.get("chat", {}) or {}
         chat_id = int(chat["id"])
         message_id = int(msg["message_id"])
@@ -261,9 +278,6 @@ class TelegramBotService:
         user_id_numeric = from_user.get("id") or sender_chat.get("id") or chat_id
         user_id = f"telegram_{user_id_numeric}"
 
-        logger.info(f"Telegram message from {user_id_numeric}: {content[:50]}...")
-
-        # Conversation routing
         thread_id = msg.get("message_thread_id")
         if thread_id is not None:
             thread_id = int(thread_id)
@@ -271,34 +285,43 @@ class TelegramBotService:
         elif chat.get("type") == "private":
             conversation_id = f"telegram_dm_{chat_id}"
         else:
+            conversation_id = f"telegram_{chat_id}"
+
+        from app.services.browser_input_service import browser_input_service
+
+        pending_browser_input = browser_input_service.get_pending_request(
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )
+
+        if not pending_browser_input and not self._should_process(msg):
+            return
+
+        if not content:
+            return
+
+        logger.info(f"Telegram message from {user_id_numeric}: {content[:50]}...")
+
+        if not pending_browser_input and thread_id is None and chat.get("type") != "private":
             created_thread_id = await self._create_forum_topic_if_possible(msg, content)
             if created_thread_id is not None:
                 thread_id = created_thread_id
                 conversation_id = f"telegram_thread_{chat_id}_{thread_id}"
-            else:
-                conversation_id = f"telegram_{chat_id}"
 
         await self._send_typing(chat_id=chat_id, thread_id=thread_id)
 
         try:
-            from app.services.slash_command_service import slash_command_service
-            result = None
+            orchestrator = self._get_orchestrator()
+            result = await orchestrator.process(
+                user_message=content,
+                user_id=user_id,
+                conversation_id=conversation_id,
+                max_iterations=3,
+            )
 
-            if slash_command_service.is_slash_command(content):
-                result = await slash_command_service.execute(
-                    message=content,
-                    user_id=user_id,
-                    conversation_id=conversation_id,
-                )
-                response_text = result.get("response", "Command executed.")
+            if result.get("task_type") == "slash_command":
+                response_text = result.get("output") or result.get("response", "Command executed.")
             else:
-                orchestrator = self._get_orchestrator()
-                result = await orchestrator.process(
-                    user_message=content,
-                    user_id=user_id,
-                    conversation_id=conversation_id,
-                    max_iterations=3,
-                )
                 response_text = result.get("output", "I couldn't generate a response.")
 
             screenshot_b64 = None
@@ -307,9 +330,11 @@ class TelegramBotService:
                 screenshot_b64 = meta.get("screenshot_base64")
                 approval_state = result.get("approval_state") or {}
                 clarification_state = result.get("clarification_state") or {}
+                browser_input_state = result.get("browser_input_state") or {}
             else:
                 approval_state = {}
                 clarification_state = {}
+                browser_input_state = {}
 
             await self._send_text_response(
                 chat_id=chat_id,
@@ -339,6 +364,14 @@ class TelegramBotService:
                         reply_markup=keyboard,
                     )
 
+            if browser_input_state.get("status") == "required":
+                await self._send_browser_input_warning(
+                    chat_id=chat_id,
+                    browser_input_state=browser_input_state,
+                    reply_to_message_id=message_id,
+                    thread_id=thread_id,
+                )
+
             if approval_state.get("status") == "required" and approval_state.get("approval_id"):
                 approval_id = approval_state["approval_id"]
                 keyboard = {
@@ -362,6 +395,7 @@ class TelegramBotService:
                     reply_to_message_id=message_id,
                     thread_id=thread_id,
                 )
+
         except Exception as e:
             logger.error(f"Telegram processing error: {e}")
             error_msg = f"Sorry, I encountered an error: {str(e)[:200]}"
@@ -454,6 +488,14 @@ class TelegramBotService:
                 reply_to_message_id=reply_to_message_id,
                 thread_id=thread_id,
             )
+            browser_input_state = result.get("browser_input_state") or {}
+            if browser_input_state.get("status") == "required":
+                await self._send_browser_input_warning(
+                    chat_id=chat_id,
+                    browser_input_state=browser_input_state,
+                    reply_to_message_id=reply_to_message_id,
+                    thread_id=thread_id,
+                )
         except Exception as e:
             logger.error(f"Telegram approval resume error: {e}")
             await self._send_text_response(
@@ -507,6 +549,14 @@ class TelegramBotService:
                 reply_to_message_id=reply_to_message_id,
                 thread_id=thread_id,
             )
+            browser_input_state = result.get("browser_input_state") or {}
+            if browser_input_state.get("status") == "required":
+                await self._send_browser_input_warning(
+                    chat_id=chat_id,
+                    browser_input_state=browser_input_state,
+                    reply_to_message_id=reply_to_message_id,
+                    thread_id=thread_id,
+                )
 
             new_approval_state = result.get("approval_state") or {}
             if new_approval_state.get("status") == "required" and new_approval_state.get("approval_id"):
