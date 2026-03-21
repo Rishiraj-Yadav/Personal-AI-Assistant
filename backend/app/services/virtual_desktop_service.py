@@ -1,6 +1,6 @@
 """
 Virtual Desktop Service — OpenClaw-style sandboxed desktops for remote users.
-Spawns per-user Xvfb containers so remote (Discord) users can have isolated
+Spawns per-user Xvfb containers so remote (Telegram) users can have isolated
 desktop control without touching the host machine.
 """
 import asyncio

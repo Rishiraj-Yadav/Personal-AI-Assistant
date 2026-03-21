@@ -6,6 +6,8 @@ from abc import ABC, abstractmethod
 from typing import Dict, Any, List
 from loguru import logger
 
+from tool_contract import normalize_tool_response
+
 
 class BaseAgent(ABC):
     """
@@ -39,21 +41,56 @@ class BaseAgent(ABC):
         """
         pass
 
-    def _success(self, result: Any, message: str = "") -> Dict[str, Any]:
+    def _success(
+        self,
+        result: Any,
+        message: str = "",
+        *,
+        observed_state: Dict[str, Any] | None = None,
+        evidence: List[Dict[str, Any]] | None = None,
+        retryable: bool = False,
+        error_code: str = "ok",
+    ) -> Dict[str, Any]:
         """Helper to build a success response"""
-        return {
-            "success": True,
-            "result": result,
-            "message": message,
-            "error": None,
-        }
+        return normalize_tool_response(
+            "",
+            {
+                "success": True,
+                "result": result,
+                "message": message,
+                "error": None,
+                "error_code": error_code,
+                "retryable": retryable,
+                "observed_state": observed_state or {},
+                "evidence": evidence or [],
+            },
+        )
 
-    def _error(self, error: str) -> Dict[str, Any]:
+    def _error(
+        self,
+        error: str,
+        *,
+        error_code: str = "execution_failed",
+        retryable: bool = False,
+        observed_state: Dict[str, Any] | None = None,
+        evidence: List[Dict[str, Any]] | None = None,
+    ) -> Dict[str, Any]:
         """Helper to build an error response"""
         logger.error(f"[{self.name}] {error}")
-        return {
-            "success": False,
-            "result": None,
-            "message": "",
-            "error": error,
-        }
+        return normalize_tool_response(
+            "",
+            {
+                "success": False,
+                "result": None,
+                "message": "",
+                "error": error,
+                "error_code": error_code,
+                "retryable": retryable,
+                "observed_state": observed_state or {},
+                "evidence": evidence or [],
+            },
+        )
+
+    def _normalize(self, tool_name: str, response: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize a response for a specific tool."""
+        return normalize_tool_response(tool_name, response)

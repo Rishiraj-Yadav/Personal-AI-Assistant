@@ -2,7 +2,8 @@
 Configuration management for SonarBot
 """
 from pydantic_settings import BaseSettings
-from typing import Optional
+from pydantic import field_validator
+from typing import Any, Optional
 
 
 class Settings(BaseSettings):
@@ -20,8 +21,8 @@ class Settings(BaseSettings):
     # CORS
     CORS_ORIGINS: list = ["http://localhost:3000", "http://localhost:5173"]
     
-    # Groq API
-    GROQ_API_KEY: str
+    # Groq API (fallback + tool-calling)
+    GROQ_API_KEY: str = ""
     GROQ_MODEL: str = "llama-3.3-70b-versatile"
     GROQ_MAX_TOKENS: int = 2048
     GROQ_TEMPERATURE: float = 0.7
@@ -37,11 +38,15 @@ class Settings(BaseSettings):
     GOOGLE_CLIENT_SECRET: str = ""
     GOOGLE_REDIRECT_URI: str = "http://localhost:8000/api/v1/auth/google/callback"
     
-    # Google Gemini (fallback LLM)
+    # Google Gemini (primary reasoning model)
     GOOGLE_API_KEY: str = ""
+    GEMINI_MODEL: str = "gemini-2.5-pro"
+    GEMINI_MAX_TOKENS: int = 2048
+    GEMINI_TEMPERATURE: float = 0.4
     
-    # Discord Bot
-    DISCORD_BOT_TOKEN: str = ""
+    # Telegram Bot
+    TELEGRAM_BOT_TOKEN: str = ""
+    TELEGRAM_ALLOWED_CHAT_IDS: str = ""
     
     # Dashboard
     DASHBOARD_BASE_URL: str = "http://localhost:8000"
@@ -118,6 +123,20 @@ Be proactive in using desktop skills when appropriate. Always use desktop_app_la
         env_file = ".env"
         case_sensitive = True
         extra = "ignore"  # Ignore extra fields from .env not defined in Settings
+
+    @field_validator("DEBUG", mode="before")
+    @classmethod
+    def parse_debug_flag(cls, value: Any) -> bool:
+        """Accept common debug mode strings from local shells and Docker envs."""
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on", "debug", "dev", "development"}:
+                return True
+            if normalized in {"0", "false", "no", "off", "release", "prod", "production"}:
+                return False
+        return bool(value)
 
 
 # Global settings instance

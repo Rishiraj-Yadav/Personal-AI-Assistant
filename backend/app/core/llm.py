@@ -1,59 +1,82 @@
 """
-LLM Adapter with Model Failover
-Primary: Groq (fast) → Fallback: Gemini (reliable)
-Inspired by OpenClaw's model failover architecture.
+LLM adapter with provider selection.
+
+Primary reasoning/parsing model: Gemini 2.5 Pro
+Fallback and tool-calling model: Groq
 """
-import os
+import asyncio
+from typing import Any, Dict, List, Optional
+
 from groq import AsyncGroq
-from typing import List, Dict, Optional
+from loguru import logger
+
 from app.config import settings
 from app.models import Message, MessageRole
-from loguru import logger
 
 
 class LLMAdapter:
-    """LLM adapter with automatic failover: Groq → Gemini"""
+    """LLM adapter with Gemini-first routing and Groq fallback."""
 
     def __init__(self):
-        """Initialize primary (Groq) and fallback (Gemini) clients"""
-        # Primary: Groq
-        self.groq_client = AsyncGroq(api_key=settings.GROQ_API_KEY)
+        """Initialize Gemini as primary and Groq as fallback/tool provider."""
         self.groq_model = settings.GROQ_MODEL
-        self.max_tokens = settings.GROQ_MAX_TOKENS
-        self.temperature = settings.GROQ_TEMPERATURE
+        self.groq_max_tokens = settings.GROQ_MAX_TOKENS
+        self.groq_temperature = settings.GROQ_TEMPERATURE
+        self.groq_client = AsyncGroq(api_key=settings.GROQ_API_KEY) if settings.GROQ_API_KEY else None
+        self._groq_available = self.groq_client is not None
 
-        # Fallback: Gemini (via google-generativeai)
+        self.gemini_model_name = settings.GEMINI_MODEL
+        self.gemini_max_tokens = settings.GEMINI_MAX_TOKENS
+        self.gemini_temperature = settings.GEMINI_TEMPERATURE
         self._gemini_model = None
         self._gemini_available = False
+
         try:
             import google.generativeai as genai
-            api_key = os.getenv("GOOGLE_API_KEY", "")
-            if api_key:
-                genai.configure(api_key=api_key)
-                self._gemini_model = genai.GenerativeModel("gemini-2.5-flash")
+
+            if settings.GOOGLE_API_KEY:
+                genai.configure(api_key=settings.GOOGLE_API_KEY)
+                self._gemini_model = genai.GenerativeModel(self.gemini_model_name)
                 self._gemini_available = True
-                logger.info("✅ Gemini fallback model configured")
-        except Exception as e:
-            logger.warning(f"⚠️ Gemini fallback not available: {e}")
+                logger.info(f"Gemini primary model configured: {self.gemini_model_name}")
+        except Exception as exc:
+            logger.warning(f"Gemini provider unavailable: {exc}")
 
-        # Track consecutive failures for health monitoring
-        self._groq_failures = 0
-        self._max_failures_before_fallback = 2
+        if self._gemini_available:
+            primary = self.gemini_model_name
+            fallback = self.groq_model if self._groq_available else "none"
+        else:
+            primary = self.groq_model if self._groq_available else "none"
+            fallback = "none"
 
-        logger.info(f"Initialized LLM with model: {self.groq_model} (failover: {'Gemini' if self._gemini_available else 'none'})")
+        if not self._gemini_available and not self._groq_available:
+            logger.error("No LLM provider configured. Set GOOGLE_API_KEY or GROQ_API_KEY.")
 
-    # Keep backward compat property
+        logger.info(
+            "Initialized LLM adapter with primary={} and fallback/tool-calling={}".format(
+                primary,
+                fallback,
+            )
+        )
+
     @property
-    def model(self):
-        return self.groq_model
+    def model(self) -> str:
+        """Expose the primary model name for backward compatibility."""
+        if self._gemini_available:
+            return self.gemini_model_name
+        if self._groq_available:
+            return self.groq_model
+        return "unconfigured"
 
     def _format_messages(self, messages: List[Message]) -> List[Dict[str, str]]:
         formatted = []
         for msg in messages:
-            formatted.append({
-                "role": msg.role.value,
-                "content": msg.content
-            })
+            formatted.append(
+                {
+                    "role": msg.role.value,
+                    "content": msg.content,
+                }
+            )
         return formatted
 
     async def generate_response(
@@ -61,53 +84,65 @@ class LLMAdapter:
         messages: List[Message],
         tools: Optional[List[Dict]] = None,
         temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None
-    ) -> Dict[str, any]:
-        """Generate response with automatic failover"""
-        # Try primary (Groq) first
-        try:
-            result = await self._call_groq(messages, tools, temperature, max_tokens)
-            self._groq_failures = 0  # Reset on success
-            return result
-        except Exception as groq_err:
-            self._groq_failures += 1
-            logger.warning(f"⚠️ Groq failed ({self._groq_failures}x): {groq_err}")
-
-            # Try Gemini fallback
-            if self._gemini_available:
+        max_tokens: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Generate a response with provider-aware fallback behavior."""
+        if tools:
+            if self._groq_available:
                 try:
-                    logger.info("🔄 Failing over to Gemini...")
-                    result = await self._call_gemini(messages, max_tokens)
-                    return result
-                except Exception as gemini_err:
-                    logger.error(f"❌ Gemini fallback also failed: {gemini_err}")
-                    raise groq_err  # Raise the original error
-            else:
+                    return await self._call_groq(messages, tools, temperature, max_tokens)
+                except Exception as groq_err:
+                    logger.warning(f"Groq tool-calling failed, falling back to Gemini text response: {groq_err}")
+                    if self._gemini_available:
+                        return await self._call_gemini(messages, max_tokens=max_tokens, temperature=temperature)
+                    raise
+            if self._gemini_available:
+                logger.warning("Tools requested without Groq configured. Falling back to Gemini text-only mode.")
+                return await self._call_gemini(messages, max_tokens=max_tokens, temperature=temperature)
+            raise RuntimeError("No LLM provider available for tool-enabled request.")
+
+        if self._gemini_available:
+            try:
+                return await self._call_gemini(messages, max_tokens=max_tokens, temperature=temperature)
+            except Exception as gemini_err:
+                logger.warning(f"Gemini failed, falling back to Groq: {gemini_err}")
+                if self._groq_available:
+                    return await self._call_groq(messages, tools=None, temperature=temperature, max_tokens=max_tokens)
                 raise
+
+        if self._groq_available:
+            return await self._call_groq(messages, tools=None, temperature=temperature, max_tokens=max_tokens)
+
+        raise RuntimeError("No LLM provider configured. Set GOOGLE_API_KEY or GROQ_API_KEY.")
 
     async def _call_groq(
         self,
         messages: List[Message],
         tools: Optional[List[Dict]] = None,
         temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None
-    ) -> Dict[str, any]:
-        """Call Groq API"""
+        max_tokens: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Call the Groq chat completions API."""
+        if not self.groq_client:
+            raise RuntimeError("Groq is not configured.")
+
         formatted_messages = self._format_messages(messages)
-
         if not any(msg["role"] == "system" for msg in formatted_messages):
-            formatted_messages.insert(0, {
-                "role": "system",
-                "content": settings.SYSTEM_PROMPT
-            })
+            formatted_messages.insert(
+                0,
+                {
+                    "role": "system",
+                    "content": settings.SYSTEM_PROMPT,
+                },
+            )
 
-        api_params = {
+        api_params: Dict[str, Any] = {
             "model": self.groq_model,
             "messages": formatted_messages,
-            "temperature": temperature or self.temperature,
-            "max_tokens": max_tokens or self.max_tokens,
+            "temperature": temperature if temperature is not None else self.groq_temperature,
+            "max_tokens": max_tokens or self.groq_max_tokens,
             "top_p": 1,
-            "stream": False
+            "stream": False,
         }
 
         if tools:
@@ -118,28 +153,30 @@ class LLMAdapter:
         choice = response.choices[0]
         tokens_used = response.usage.total_tokens if response.usage else None
 
-        result = {
+        result: Dict[str, Any] = {
             "model": self.groq_model,
             "provider": "groq",
             "tokens_used": tokens_used,
-            "finish_reason": choice.finish_reason
+            "finish_reason": choice.finish_reason,
         }
 
         if choice.finish_reason == "tool_calls" and choice.message.tool_calls:
             result["tool_calls"] = []
             for tool_call in choice.message.tool_calls:
-                result["tool_calls"].append({
-                    "id": tool_call.id,
-                    "type": tool_call.type,
-                    "function": {
-                        "name": tool_call.function.name,
-                        "arguments": tool_call.function.arguments
+                result["tool_calls"].append(
+                    {
+                        "id": tool_call.id,
+                        "type": tool_call.type,
+                        "function": {
+                            "name": tool_call.function.name,
+                            "arguments": tool_call.function.arguments,
+                        },
                     }
-                })
+                )
             result["response"] = choice.message.content or ""
-            logger.info(f"LLM requested {len(result['tool_calls'])} tool calls")
+            logger.info(f"Groq requested {len(result['tool_calls'])} tool calls")
         else:
-            result["response"] = choice.message.content
+            result["response"] = choice.message.content or ""
             logger.info(f"Groq response generated: {tokens_used} tokens used")
 
         return result
@@ -147,50 +184,77 @@ class LLMAdapter:
     async def _call_gemini(
         self,
         messages: List[Message],
-        max_tokens: Optional[int] = None
-    ) -> Dict[str, any]:
-        """Call Gemini as fallback (sync wrapper)"""
-        import asyncio
+        max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Call Gemini using the synchronous SDK through a worker thread."""
+        if not self._gemini_available or not self._gemini_model:
+            raise RuntimeError("Gemini is not configured.")
 
-        # Build a single prompt from messages
-        parts = []
+        parts: List[str] = []
+        if not any(msg.role.value == "system" for msg in messages):
+            parts.append(f"System: {settings.SYSTEM_PROMPT}")
+
         for msg in messages:
-            prefix = {"system": "System", "user": "User", "assistant": "Assistant"}.get(msg.role.value, "User")
+            prefix = {
+                "system": "System",
+                "user": "User",
+                "assistant": "Assistant",
+            }.get(msg.role.value, "User")
             parts.append(f"{prefix}: {msg.content}")
-        prompt = "\n\n".join(parts)
 
-        # Gemini SDK is synchronous, run in thread
-        loop = asyncio.get_event_loop()
+        prompt = "\n\n".join(parts)
+        generation_config = {
+            "temperature": temperature if temperature is not None else self.gemini_temperature,
+            "max_output_tokens": max_tokens or self.gemini_max_tokens,
+        }
+
+        loop = asyncio.get_running_loop()
         response = await loop.run_in_executor(
-            None, lambda: self._gemini_model.generate_content(prompt)
+            None,
+            lambda: self._gemini_model.generate_content(
+                prompt,
+                generation_config=generation_config,
+            ),
         )
 
-        text = response.text if response.text else ""
-        logger.info(f"Gemini fallback response generated ({len(text)} chars)")
+        text = getattr(response, "text", "") or ""
+        logger.info(f"Gemini response generated ({len(text)} chars)")
 
         return {
-            "model": "gemini-2.5-flash",
+            "model": self.gemini_model_name,
             "provider": "gemini",
             "tokens_used": None,
             "finish_reason": "stop",
-            "response": text
+            "response": text,
         }
 
     async def check_health(self) -> Dict[str, bool]:
-        """Check health of all LLM providers"""
-        health = {"groq": False, "gemini": self._gemini_available}
+        """Check provider availability with lightweight test calls."""
+        health = {
+            "gemini": False,
+            "groq": False,
+        }
 
-        try:
-            test_messages = [{"role": "user", "content": "Hello"}]
-            await self.groq_client.chat.completions.create(
-                model=self.groq_model, messages=test_messages, max_tokens=5
-            )
-            health["groq"] = True
-        except Exception as e:
-            logger.error(f"Groq health check failed: {e}")
+        if self._gemini_available:
+            try:
+                await self._call_gemini([Message(role=MessageRole.USER, content="Hello")])
+                health["gemini"] = True
+            except Exception as exc:
+                logger.error(f"Gemini health check failed: {exc}")
+
+        if self._groq_available:
+            try:
+                await self.groq_client.chat.completions.create(
+                    model=self.groq_model,
+                    messages=[{"role": "user", "content": "Hello"}],
+                    max_tokens=5,
+                )
+                health["groq"] = True
+            except Exception as exc:
+                logger.error(f"Groq health check failed: {exc}")
 
         return health
 
 
-# Global LLM adapter instance (backward compatible name)
 llm_adapter = LLMAdapter()

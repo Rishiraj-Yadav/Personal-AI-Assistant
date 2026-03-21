@@ -223,17 +223,11 @@ class GUIAgent(BaseAgent):
                 },
             },
             {
-                "name": "find_element_coordinates_on_screen",
-                "description": "Uses visual AI to look at the screen and find the exact X,Y coordinates of an element (button, icon, text) you want to click.",
+                "name": "get_active_window",
+                "description": "Get the currently active/focused window title and bounds",
                 "parameters": {
                     "type": "object",
-                    "properties": {
-                        "element_description": {
-                            "type": "string",
-                            "description": "Description of the element to find (e.g., 'the green submit button', 'the minimize icon in the top right')",
-                        },
-                    },
-                    "required": ["element_description"],
+                    "properties": {},
                 },
             },
         ]
@@ -254,7 +248,7 @@ class GUIAgent(BaseAgent):
             "focus_window": self._focus_window,
             "minimize_window": self._minimize_window,
             "maximize_window": self._maximize_window,
-            "find_element_coordinates_on_screen": self._find_element_coordinates,
+            "get_active_window": self._get_active_window,
         }
 
         handler = handlers.get(tool_name)
@@ -264,7 +258,7 @@ class GUIAgent(BaseAgent):
 
     def _mouse_click(self, args: Dict) -> Dict[str, Any]:
         if not self._mouse:
-            return self._error("Mouse control not available")
+            return self._error("Mouse control not available", error_code="tool_unavailable")
         try:
             result = self._mouse.execute({
                 "action": "click",
@@ -273,75 +267,103 @@ class GUIAgent(BaseAgent):
                 "button": args.get("button", "left"),
                 "clicks": args.get("clicks", 1),
             })
-            return self._success(result, f"Clicked at ({args.get('x')}, {args.get('y')})")
+            if not result.get("success"):
+                return self._error(result.get("error", "Mouse click failed"), retryable=True)
+            return self._success(
+                result,
+                f"Clicked at ({args.get('x')}, {args.get('y')})",
+                observed_state={"position": result.get("position"), "button": result.get("button"), "clicks": result.get("clicks")},
+            )
         except Exception as e:
-            return self._error(f"Mouse click failed: {e}")
+            return self._error(f"Mouse click failed: {e}", retryable=True)
 
     def _mouse_move(self, args: Dict) -> Dict[str, Any]:
         if not self._mouse:
-            return self._error("Mouse control not available")
+            return self._error("Mouse control not available", error_code="tool_unavailable")
         try:
             result = self._mouse.execute({
                 "action": "move",
                 "x": args.get("x"),
                 "y": args.get("y"),
             })
-            return self._success(result, f"Moved mouse to ({args.get('x')}, {args.get('y')})")
+            if not result.get("success"):
+                return self._error(result.get("error", "Mouse move failed"), retryable=True)
+            return self._success(
+                result,
+                f"Moved mouse to ({args.get('x')}, {args.get('y')})",
+                observed_state={"final_position": result.get("final_position")},
+            )
         except Exception as e:
-            return self._error(f"Mouse move failed: {e}")
+            return self._error(f"Mouse move failed: {e}", retryable=True)
 
     def _mouse_scroll(self, args: Dict) -> Dict[str, Any]:
         if not self._mouse:
-            return self._error("Mouse control not available")
+            return self._error("Mouse control not available", error_code="tool_unavailable")
         try:
             result = self._mouse.execute({
                 "action": "scroll",
                 "amount": args.get("amount", 3),
             })
-            return self._success(result, f"Scrolled {args.get('amount')}")
+            if not result.get("success"):
+                return self._error(result.get("error", "Mouse scroll failed"), retryable=True)
+            return self._success(
+                result,
+                f"Scrolled {args.get('amount')}",
+                observed_state={"amount": result.get("amount"), "direction": result.get("direction")},
+            )
         except Exception as e:
-            return self._error(f"Mouse scroll failed: {e}")
+            return self._error(f"Mouse scroll failed: {e}", retryable=True)
 
     def _type_text(self, args: Dict) -> Dict[str, Any]:
         if not self._keyboard:
-            return self._error("Keyboard control not available")
+            return self._error("Keyboard control not available", error_code="tool_unavailable")
         try:
             result = self._keyboard.execute({
                 "action": "type",
                 "text": args.get("text", ""),
             })
-            return self._success(result, f"Typed text")
+            if not result.get("success"):
+                return self._error(result.get("error", "Type text failed"), retryable=True)
+            return self._success(
+                result,
+                "Typed text",
+                observed_state={"length": result.get("length")},
+            )
         except Exception as e:
-            return self._error(f"Type text failed: {e}")
+            return self._error(f"Type text failed: {e}", retryable=True)
 
     def _press_key(self, args: Dict) -> Dict[str, Any]:
         if not self._keyboard:
-            return self._error("Keyboard control not available")
+            return self._error("Keyboard control not available", error_code="tool_unavailable")
         try:
             result = self._keyboard.execute({
                 "action": "press",
                 "key": args.get("key", ""),
             })
+            if not result.get("success"):
+                return self._error(result.get("error", "Press key failed"), retryable=True)
             return self._success(result, f"Pressed {args.get('key')}")
         except Exception as e:
-            return self._error(f"Press key failed: {e}")
+            return self._error(f"Press key failed: {e}", retryable=True)
 
     def _press_hotkey(self, args: Dict) -> Dict[str, Any]:
         if not self._keyboard:
-            return self._error("Keyboard control not available")
+            return self._error("Keyboard control not available", error_code="tool_unavailable")
         try:
             keys = args.get("keys", "").split("+")
             result = self._keyboard.execute({
                 "action": "hotkey",
                 "keys": [k.strip() for k in keys],
             })
+            if not result.get("success"):
+                return self._error(result.get("error", "Hotkey failed"), retryable=True)
             return self._success(result, f"Pressed hotkey {args.get('keys')}")
         except Exception as e:
-            return self._error(f"Hotkey failed: {e}")
+            return self._error(f"Hotkey failed: {e}", retryable=True)
 
     def _take_screenshot(self, args: Dict) -> Dict[str, Any]:
         if not self._screenshot:
-            return self._error("Screenshot not available")
+            return self._error("Screenshot not available", error_code="tool_unavailable")
         try:
             params = {"format": "base64"}
             region_str = args.get("region")
@@ -353,119 +375,142 @@ class GUIAgent(BaseAgent):
                         "width": parts[2], "height": parts[3],
                     }
             result = self._screenshot.execute(params)
+            if not result.get("success"):
+                return self._error(result.get("error", "Screenshot failed"), retryable=True)
             return self._success(
-                {"screenshot_taken": True, "has_data": bool(result)},
+                result,
                 "Screenshot taken",
+                observed_state={
+                    "width": result.get("width"),
+                    "height": result.get("height"),
+                    "monitor": result.get("monitor"),
+                },
+                evidence=[
+                    {
+                        "type": "screenshot",
+                        "summary": "Screenshot captured from desktop.",
+                        "image_base64": result.get("image_base64"),
+                    }
+                ],
             )
         except Exception as e:
-            return self._error(f"Screenshot failed: {e}")
+            return self._error(f"Screenshot failed: {e}", retryable=True)
 
     def _read_screen(self, args: Dict) -> Dict[str, Any]:
         if not self._screen_reader:
-            return self._error("Screen reader not available (OCR not installed)")
+            return self._error("Screen reader not available (OCR not installed)", error_code="tool_unavailable")
         try:
             result = self._screen_reader.execute({})
-            return self._success(result, "Screen text read via OCR")
+            if not result.get("success"):
+                return self._error(result.get("error", "Screen read failed"), retryable=True)
+            text = result.get("text", "")
+            return self._success(
+                result,
+                "Screen text read via OCR",
+                observed_state={"line_count": result.get("line_count"), "has_text": bool(text)},
+                evidence=[{"type": "ocr_text", "text_excerpt": text[:1000], "summary": text[:200]}],
+            )
         except Exception as e:
-            return self._error(f"Screen read failed: {e}")
+            return self._error(f"Screen read failed: {e}", retryable=True)
 
     def _list_windows(self, args: Dict) -> Dict[str, Any]:
         if not self._window_manager:
-            return self._error("Window manager not available")
+            return self._error("Window manager not available", error_code="tool_unavailable")
         try:
             result = self._window_manager.execute({"action": "list"})
-            return self._success(result, "Listed all windows")
+            if not result.get("success"):
+                return self._error(result.get("error", "List windows failed"), retryable=True)
+            windows = result.get("windows", [])
+            return self._success(
+                {"windows": windows, "count": result.get("count", len(windows))},
+                "Listed all windows",
+                observed_state={"window_count": len(windows)},
+                evidence=[{"type": "window_list", "windows": windows[:10]}],
+            )
         except Exception as e:
-            return self._error(f"List windows failed: {e}")
+            return self._error(f"List windows failed: {e}", retryable=True)
 
     def _focus_window(self, args: Dict) -> Dict[str, Any]:
         if not self._window_manager:
-            return self._error("Window manager not available")
+            return self._error("Window manager not available", error_code="tool_unavailable")
         try:
             result = self._window_manager.execute({
                 "action": "focus",
                 "title": args.get("title", ""),
             })
-            return self._success(result, f"Focused window: {args.get('title')}")
+            if not result.get("success"):
+                return self._error(result.get("error", "Focus window failed"), retryable=True)
+            active = self._window_manager.execute({"action": "get_active"})
+            active_title = active.get("title", "") if active.get("success") else ""
+            verified = args.get("title", "").lower() in active_title.lower()
+            if not verified:
+                return self._error(
+                    f"Window focus could not be verified for {args.get('title')}",
+                    error_code="verification_failed",
+                    retryable=True,
+                    observed_state={"requested_title": args.get("title", ""), "active_title": active_title},
+                    evidence=[{"type": "active_window", "title": active_title}],
+                )
+            return self._success(
+                {"requested_title": args.get("title", ""), "active_title": active_title},
+                f"Focused window: {args.get('title')}",
+                observed_state={"requested_title": args.get("title", ""), "active_title": active_title},
+                evidence=[{"type": "active_window", "title": active_title}],
+            )
         except Exception as e:
-            return self._error(f"Focus window failed: {e}")
+            return self._error(f"Focus window failed: {e}", retryable=True)
 
     def _minimize_window(self, args: Dict) -> Dict[str, Any]:
         if not self._window_manager:
-            return self._error("Window manager not available")
+            return self._error("Window manager not available", error_code="tool_unavailable")
         try:
             result = self._window_manager.execute({
                 "action": "minimize",
                 "title": args.get("title", ""),
             })
-            return self._success(result, f"Minimized window: {args.get('title')}")
+            if not result.get("success"):
+                return self._error(result.get("error", "Minimize failed"), retryable=True)
+            return self._success(
+                result,
+                f"Minimized window: {args.get('title')}",
+                observed_state={"requested_title": args.get("title", ""), "matched_title": result.get("matched_title", "")},
+            )
         except Exception as e:
-            return self._error(f"Minimize failed: {e}")
+            return self._error(f"Minimize failed: {e}", retryable=True)
 
     def _maximize_window(self, args: Dict) -> Dict[str, Any]:
         if not self._window_manager:
-            return self._error("Window manager not available")
+            return self._error("Window manager not available", error_code="tool_unavailable")
         try:
             result = self._window_manager.execute({
                 "action": "maximize",
                 "title": args.get("title", ""),
             })
-            return self._success(result, f"Maximized window: {args.get('title')}")
-        except Exception as e:
-            return self._error(f"Maximize failed: {e}")
-
-    def _find_element_coordinates(self, args: Dict) -> Dict[str, Any]:
-        """Use Gemini Vision to analyze screenshot and return XY coordinates"""
-        if not self._screenshot:
-            return self._error("Screenshot not available")
-        
-        desc = args.get("element_description", "")
-        if not desc:
-            return self._error("Must provide element_description")
-
-        try:
-            # Get base64 screenshot
-            screenshot_data = self._screenshot.execute({"format": "base64"})
-            if not screenshot_data:
-                return self._error("Failed to capture screenshot data")
-                
-            # Send to Gemini Flash for XY extraction (Vision capability)
-            import google.generativeai as genai
-            from config import settings
-            import io
-            from PIL import Image
-            import base64
-            import json
-            
-            genai.configure(api_key=settings.GOOGLE_API_KEY)
-            vision_model = genai.GenerativeModel("gemini-2.0-flash")
-            
-            # Decode base64 to image
-            try:
-                img_bytes = base64.b64decode(screenshot_data)
-                img = Image.open(io.BytesIO(img_bytes))
-            except Exception as e:
-                return self._error(f"Failed to decode image: {e}")
-                
-            width, height = img.size
-            
-            prompt = f"Look at this screenshot of size {width}x{height}. Find: '{desc}'. Return ONLY a JSON dictionary with 'x' and 'y' integer coordinates representing its center point. Do not wrap in markdown."
-            
-            response = vision_model.generate_content([prompt, img])
-            text = response.text.strip()
-            
-            if text.startswith("```json"): text = text[7:-3].strip()
-            if text.startswith("```"): text = text[3:-3].strip()
-                
-            coords = json.loads(text)
-            
+            if not result.get("success"):
+                return self._error(result.get("error", "Maximize failed"), retryable=True)
             return self._success(
-                {"x": coords.get("x"), "y": coords.get("y"), "element": desc},
-                f"Found {desc} at ({coords.get('x')}, {coords.get('y')})"
+                result,
+                f"Maximized window: {args.get('title')}",
+                observed_state={"requested_title": args.get("title", ""), "matched_title": result.get("matched_title", "")},
             )
-            
         except Exception as e:
-            return self._error(f"Visual grounding failed to find element: {e}")
+            return self._error(f"Maximize failed: {e}", retryable=True)
+
+    def _get_active_window(self, args: Dict) -> Dict[str, Any]:
+        if not self._window_manager:
+            return self._error("Window manager not available", error_code="tool_unavailable")
+        try:
+            result = self._window_manager.execute({"action": "get_active"})
+            if not result.get("success"):
+                return self._error(result.get("error", "Get active window failed"), retryable=True)
+            return self._success(
+                result,
+                f"Active window: {result.get('title', 'Unknown')}",
+                observed_state={"title": result.get("title", ""), "id": result.get("id")},
+                evidence=[{"type": "active_window", "title": result.get("title", ""), "rect": result.get("rect", {})}],
+            )
+        except Exception as e:
+            return self._error(f"Get active window failed: {e}", retryable=True)
 
 
 # Global instance

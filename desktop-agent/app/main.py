@@ -5,8 +5,9 @@ Runs on host machine (not Docker) to access the physical desktop.
 """
 from fastapi import FastAPI, HTTPException, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Dict, Any, Optional, List
+import asyncio
 import uvicorn
 from loguru import logger
 import sys
@@ -23,12 +24,76 @@ from agent_brain import brain
 
 # ───── Initialize Agents ─────
 def register_all_agents():
-    """Dynamically import and register all specialist agents"""
-    # Simply point to the agents directory to dynamically load plugins
-    # exactly like OpenClaw's plugin architecture!
-    current_dir = Path(__file__).parent
-    agents_dir = current_dir / "agents"
-    return registry.discover_agents(str(agents_dir))
+    """Import and register all specialist agents"""
+    agents_loaded = []
+
+    try:
+        from agents.app_agent import app_agent
+        registry.register_agent(app_agent)
+        agents_loaded.append("app")
+    except Exception as e:
+        logger.warning(f"Failed to load App Agent: {e}")
+
+    try:
+        from agents.shell_agent import shell_agent
+        registry.register_agent(shell_agent)
+        agents_loaded.append("shell")
+    except Exception as e:
+        logger.warning(f"Failed to load Shell Agent: {e}")
+
+    try:
+        from agents.file_agent import file_agent
+        registry.register_agent(file_agent)
+        agents_loaded.append("file")
+    except Exception as e:
+        logger.warning(f"Failed to load File Agent: {e}")
+
+    try:
+        from agents.gui_agent import gui_agent
+        registry.register_agent(gui_agent)
+        agents_loaded.append("gui")
+    except Exception as e:
+        logger.warning(f"Failed to load GUI Agent: {e}")
+
+    try:
+        from agents.system_agent import system_agent
+        registry.register_agent(system_agent)
+        agents_loaded.append("system")
+    except Exception as e:
+        logger.warning(f"Failed to load System Agent: {e}")
+
+    try:
+        from agents.web_agent import web_agent
+        registry.register_agent(web_agent)
+        agents_loaded.append("web")
+    except Exception as e:
+        logger.warning(f"Failed to load Web Agent: {e}")
+
+    try:
+        from agents.scheduler_agent import scheduler_agent
+        registry.register_agent(scheduler_agent)
+        agents_loaded.append("scheduler")
+    except Exception as e:
+        logger.warning(f"Failed to load Scheduler Agent: {e}")
+
+    try:
+        from agents.notification_agent import notification_agent
+        registry.register_agent(notification_agent)
+        agents_loaded.append("notification")
+    except Exception as e:
+        logger.warning(f"Failed to load Notification Agent: {e}")
+
+    try:
+        from agents.browser_agent import browser_agent
+        registry.register_agent(browser_agent)
+        agents_loaded.append("browser")
+    except Exception as e:
+        logger.warning(f"Failed to load Browser Agent: {e}")
+
+    logger.info(
+        f"✅ Loaded {len(agents_loaded)}/{9} agents: {', '.join(agents_loaded)}"
+    )
+    return agents_loaded
 
 
 # Register agents at import time
@@ -78,33 +143,12 @@ class SkillExecutionResponse(BaseModel):
     result: Any
     safe_mode: bool = False
     error: Optional[str] = None
-
-
-class NodeDescribeResponse(BaseModel):
-    """Node identity + status (OpenClaw-style)"""
-    ok: bool
-    node: Dict[str, Any]
-
-
-class NodeToolsResponse(BaseModel):
-    """Node tools list (OpenClaw-style)"""
-    ok: bool
-    tools: List[Dict[str, Any]]
-
-
-class NodeExecuteRequest(BaseModel):
-    """Node tool execution request (OpenClaw-style)"""
-    tool: str
-    args: Dict[str, Any] = {}
-    session_id: Optional[str] = None
-
-
-class NodeExecuteResponse(BaseModel):
-    """Node tool execution response (OpenClaw-style)"""
-    ok: bool
-    tool: str
-    result: Any = None
-    error: Optional[str] = None
+    message: str = ""
+    error_code: Optional[str] = None
+    retryable: bool = False
+    observed_state: Dict[str, Any] = Field(default_factory=dict)
+    evidence: List[Dict[str, Any]] = Field(default_factory=list)
+    tool_name: Optional[str] = None
 
 
 # ───── Auth ─────
@@ -174,12 +218,19 @@ async def execute_skill_direct(
     Bypasses the brain — calls the skill directly.
     """
     try:
-        result = registry.execute_tool(request.skill, request.args)
+        # Run sync tools off the asyncio loop (Playwright sync API forbids running on the loop)
+        result = await asyncio.to_thread(registry.execute_tool, request.skill, request.args)
         return SkillExecutionResponse(
             success=result.get("success", False),
             result=result.get("result"),
             safe_mode=request.safe_mode or settings.SAFE_MODE,
             error=result.get("error"),
+            message=result.get("message", ""),
+            error_code=result.get("error_code"),
+            retryable=result.get("retryable", False),
+            observed_state=result.get("observed_state") or {},
+            evidence=result.get("evidence") or [],
+            tool_name=result.get("tool_name"),
         )
     except Exception as e:
         logger.error(f"Direct execution error: {e}")
@@ -189,67 +240,19 @@ async def execute_skill_direct(
 @app.get("/capabilities")
 async def list_capabilities(api_key: str = Depends(verify_api_key)):
     """List all agents, their tools, and descriptions"""
+    agents = registry.list_agents()
+    tools = sorted(
+        {
+            tool_name
+            for agent in agents
+            for tool_name in agent.get("tools", [])
+        }
+    )
     return {
-        "agents": registry.list_agents(),
+        "agents": agents,
+        "tools": tools,
         "total_tools": registry.tool_count,
     }
-
-
-# ───── Node Protocol (Gateway ↔ Node) ─────
-@app.get("/node/describe", response_model=NodeDescribeResponse)
-async def node_describe(api_key: str = Depends(verify_api_key)):
-    """
-    Describe this node and its current status.
-    This is designed for a Gateway to discover/monitor node capabilities.
-    """
-    return NodeDescribeResponse(
-        ok=True,
-        node={
-            "id": "desktop-windows",
-            "name": "Desktop Node (Windows)",
-            "version": "2.0.0",
-            "endpoint": f"http://{settings.HOST}:{settings.PORT}",
-            "safe_mode": settings.SAFE_MODE,
-            "agents_loaded": registry.agent_count,
-            "tools_available": registry.tool_count,
-            "brain_ready": brain.model is not None,
-        },
-    )
-
-
-@app.get("/node/tools", response_model=NodeToolsResponse)
-async def node_tools(api_key: str = Depends(verify_api_key)):
-    """
-    Return tool declarations in a node-friendly format.
-    For now, we reuse the registry tools as-is; the Gateway will normalize schemas.
-    """
-    tools_raw = registry.list_all_tools()
-    # Flatten to keep it lightweight for the Gateway.
-    flat = []
-    for item in tools_raw:
-        fn = item.get("function") or {}
-        if fn.get("name"):
-            flat.append(fn)
-    return NodeToolsResponse(ok=True, tools=flat)
-
-
-@app.post("/node/execute", response_model=NodeExecuteResponse)
-async def node_execute(
-    request: NodeExecuteRequest,
-    api_key: str = Depends(verify_api_key),
-):
-    """
-    Execute a tool directly on this node.
-    This bypasses the NL brain and is intended for Gateway-driven tool execution.
-    """
-    try:
-        result = registry.execute_tool(request.tool, request.args)
-        if result.get("success"):
-            return NodeExecuteResponse(ok=True, tool=request.tool, result=result.get("result"))
-        return NodeExecuteResponse(ok=False, tool=request.tool, error=result.get("error") or "Tool failed")
-    except Exception as e:
-        logger.error(f"Node execute error: {e}")
-        return NodeExecuteResponse(ok=False, tool=request.tool, error=str(e))
 
 
 @app.post("/clear-history")
@@ -275,55 +278,26 @@ async def resume(api_key: str = Depends(verify_api_key)):
     return {"success": True, "safe_mode": False}
 
 
-# ───── Backend WebSocket Connection ─────
-_ws_client = None
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize WebSocket connection to backend on startup"""
-    global _ws_client
-    backend_ws_url = os.environ.get("BACKEND_WS_URL", "ws://localhost:8000/ws/desktop")
-    
-    try:
-        from backend_client import start_ws_client
-        _ws_client = await start_ws_client(backend_ws_url)
-        logger.info(f"🔌 WebSocket client started (backend: {backend_ws_url})")
-    except Exception as e:
-        logger.warning(f"⚠️ WebSocket client not started: {e}")
-        logger.info("📡 Running in HTTP-only mode")
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Cleanup on shutdown"""
-    global _ws_client
-    if _ws_client:
-        await _ws_client.disconnect()
-
-
 # ───── Startup ─────
 def startup_banner():
     """Print startup banner"""
     print("\n" + "=" * 60)
-    print("🤖  DESKTOP AGENT v2 — AI Desktop Assistant (Phase 6)")
+    print("DESKTOP AGENT v2 - AI Desktop Assistant")
     print("=" * 60)
     print(f"Host: {settings.HOST}:{settings.PORT}")
-    print(f"Brain: {'Gemini Flash ✓' if brain.model else '❌ NOT CONFIGURED'}")
+    print(f"Brain: {'Gemini Flash READY' if brain.model else 'NOT CONFIGURED'}")
     print(f"Agents: {registry.agent_count} loaded")
     print(f"Tools: {registry.tool_count} available")
-    print(f"Safe Mode: {'ON ✓' if settings.SAFE_MODE else 'OFF ⚠️'}")
+    print(f"Safe Mode: {'ON' if settings.SAFE_MODE else 'OFF'}")
     print("=" * 60)
     print(f"API Key: {settings.API_KEY[:20]}...")
-    backend_ws = os.environ.get("BACKEND_WS_URL", "ws://localhost:8000/ws/desktop")
-    print(f"Backend WS: {backend_ws}")
     print("=" * 60)
 
     if not brain.model:
-        print("\n⚠️  Set GOOGLE_API_KEY in .env.desktop to enable the brain!")
+        print("\nSet GOOGLE_API_KEY in .env.desktop or .env to enable the brain.")
 
-    # List all agents
     for agent_info in registry.list_agents():
-        print(f"  • {agent_info['name']}: {', '.join(agent_info['tools'])}")
+        print(f"  - {agent_info['name']}: {', '.join(agent_info['tools'])}")
 
     print("=" * 60 + "\n")
 
@@ -359,3 +333,4 @@ if __name__ == "__main__":
         port=settings.PORT,
         log_level=settings.LOG_LEVEL.lower(),
     )
+

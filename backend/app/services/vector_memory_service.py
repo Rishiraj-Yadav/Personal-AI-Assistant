@@ -37,6 +37,8 @@ class VectorMemoryService:
         self.qdrant_url = os.getenv("QDRANT_URL", "http://localhost:6333")
         self._client = None
         self._embedder = None
+        self._client_init_failed = False
+        self._last_client_error = ""
         self.embedding_dim = 384  # all-MiniLM-L6-v2 output dimension
         
         self.MESSAGES_COLLECTION = "user_messages"
@@ -45,10 +47,18 @@ class VectorMemoryService:
         logger.info("✅ Vector Memory Service initialized (lazy loading)")
     
     @property
-    def client(self) -> QdrantClient:
-        """Lazy load Qdrant client with retry"""
+    def client(self) -> Optional[QdrantClient]:
+        """Lazy load Qdrant client with retry, but degrade gracefully if unavailable."""
+        if self._client_init_failed:
+            return None
         if self._client is None:
-            self._client = self._connect_with_retry()
+            try:
+                self._client = self._connect_with_retry()
+            except Exception as e:
+                self._client_init_failed = True
+                self._last_client_error = str(e)
+                logger.warning(f"⚠️ Vector memory disabled for this process: {e}")
+                return None
         return self._client
     
     @property
@@ -157,6 +167,9 @@ class VectorMemoryService:
             return
         
         try:
+            client = self.client
+            if not client:
+                return
             vector = self.embed_text(content)
             point_id = _generate_point_id()
             
@@ -173,7 +186,7 @@ class VectorMemoryService:
                 }
             )
             
-            self.client.upsert(
+            client.upsert(
                 collection_name=self.MESSAGES_COLLECTION,
                 points=[point]
             )
@@ -199,6 +212,9 @@ class VectorMemoryService:
             return
         
         try:
+            client = self.client
+            if not client:
+                return
             combined = f"User asked: {user_message}\nAssistant answered: {assistant_response[:500]}"
             vector = self.embed_text(combined)
             point_id = _generate_point_id()
@@ -218,7 +234,7 @@ class VectorMemoryService:
                 }
             )
             
-            self.client.upsert(
+            client.upsert(
                 collection_name=self.MESSAGES_COLLECTION,
                 points=[point]
             )
@@ -245,6 +261,9 @@ class VectorMemoryService:
             return
         
         try:
+            client = self.client
+            if not client:
+                return
             vector = self.embed_text(content)
             point_id = _generate_point_id()
             
@@ -260,7 +279,7 @@ class VectorMemoryService:
                 }
             )
             
-            self.client.upsert(
+            client.upsert(
                 collection_name=self.INSIGHTS_COLLECTION,
                 points=[point]
             )
@@ -284,9 +303,12 @@ class VectorMemoryService:
         Threshold 0.3 ensures we catch more relevant context.
         """
         try:
+            client = self.client
+            if not client:
+                return []
             query_vector = self.embed_text(query)
             
-            results = self.client.search(
+            results = client.search(
                 collection_name=self.MESSAGES_COLLECTION,
                 query_vector=query_vector,
                 query_filter=Filter(
@@ -331,6 +353,9 @@ class VectorMemoryService:
     ) -> List[Dict]:
         """Find relevant insights about the user"""
         try:
+            client = self.client
+            if not client:
+                return []
             query_vector = self.embed_text(query)
             
             filter_conditions = [
@@ -348,7 +373,7 @@ class VectorMemoryService:
                     )
                 )
             
-            results = self.client.search(
+            results = client.search(
                 collection_name=self.INSIGHTS_COLLECTION,
                 query_vector=query_vector,
                 query_filter=Filter(must=filter_conditions),
@@ -376,7 +401,10 @@ class VectorMemoryService:
     def get_all_user_insights(self, user_id: str, limit: int = 50) -> List[Dict]:
         """Get ALL stored insights for a user (scroll-based, not similarity)"""
         try:
-            results, _ = self.client.scroll(
+            client = self.client
+            if not client:
+                return []
+            results, _ = client.scroll(
                 collection_name=self.INSIGHTS_COLLECTION,
                 scroll_filter=Filter(
                     must=[
@@ -407,7 +435,10 @@ class VectorMemoryService:
     def get_recent_user_messages(self, user_id: str, limit: int = 20) -> List[Dict]:
         """Get recent messages for a user across ALL conversations"""
         try:
-            results, _ = self.client.scroll(
+            client = self.client
+            if not client:
+                return []
+            results, _ = client.scroll(
                 collection_name=self.MESSAGES_COLLECTION,
                 scroll_filter=Filter(
                     must=[
@@ -570,7 +601,10 @@ class VectorMemoryService:
     def get_stats(self, user_id: str) -> Dict:
         """Get statistics about user's vector memory"""
         try:
-            message_count = self.client.count(
+            client = self.client
+            if not client:
+                return {'total_messages': 0, 'total_insights': 0, 'available': False, 'error': self._last_client_error}
+            message_count = client.count(
                 collection_name=self.MESSAGES_COLLECTION,
                 count_filter=Filter(
                     must=[
@@ -582,7 +616,7 @@ class VectorMemoryService:
                 )
             )
             
-            insight_count = self.client.count(
+            insight_count = client.count(
                 collection_name=self.INSIGHTS_COLLECTION,
                 count_filter=Filter(
                     must=[
@@ -596,12 +630,33 @@ class VectorMemoryService:
             
             return {
                 'total_messages': message_count.count,
-                'total_insights': insight_count.count
+                'total_insights': insight_count.count,
+                'available': True,
+                'error': ''
             }
         
         except Exception as e:
             logger.error(f"❌ Error getting stats: {e}")
-            return {'total_messages': 0, 'total_insights': 0}
+            return {'total_messages': 0, 'total_insights': 0, 'available': False, 'error': str(e)}
+
+    def get_collection_stats(self) -> Dict:
+        """Return global collection stats for health/status surfaces."""
+        try:
+            client = self.client
+            if not client:
+                return {'total_messages': 0, 'total_insights': 0, 'available': False, 'error': self._last_client_error}
+
+            message_count = client.count(collection_name=self.MESSAGES_COLLECTION)
+            insight_count = client.count(collection_name=self.INSIGHTS_COLLECTION)
+            return {
+                'total_messages': message_count.count,
+                'total_insights': insight_count.count,
+                'available': True,
+                'error': '',
+            }
+        except Exception as e:
+            logger.error(f"❌ Error getting collection stats: {e}")
+            return {'total_messages': 0, 'total_insights': 0, 'available': False, 'error': str(e)}
 
 
 # Global instance

@@ -4,8 +4,6 @@ import MessageList from './MessageList'
 import { getUserId, getUserName, setUserName, hasUserName } from '../utils/userId'
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1'
-const GATEWAY_WS_URL = import.meta.env.VITE_GATEWAY_WS || 'ws://localhost:18789/ws'
-const USE_GATEWAY_CHAT = (import.meta.env.VITE_USE_GATEWAY_CHAT || 'false') === 'true'
 const CONVERSATION_ID_KEY = 'sonarbot_conversation_id'
 
 const SLASH_COMMANDS = [
@@ -37,11 +35,8 @@ function ChatInterface() {
     return localStorage.getItem(CONVERSATION_ID_KEY) || null
   })
 
-  const [gatewaySessionId, setGatewaySessionId] = useState(() => {
-    return localStorage.getItem('gateway_session_id') || null
-  })
-
   const [webPermissionPending, setWebPermissionPending] = useState(null)
+  const [taskApprovalPending, setTaskApprovalPending] = useState(null)
 
   const messagesEndRef = useRef(null)
   const inputRef = useRef(null)
@@ -61,10 +56,6 @@ function ChatInterface() {
   useEffect(() => {
     if (conversationId) localStorage.setItem(CONVERSATION_ID_KEY, conversationId)
   }, [conversationId])
-
-  useEffect(() => {
-    if (gatewaySessionId) localStorage.setItem('gateway_session_id', gatewaySessionId)
-  }, [gatewaySessionId])
 
   // Close profile dropdown on outside click
   useEffect(() => {
@@ -147,47 +138,64 @@ function ChatInterface() {
     setSlashSuggestions([])
 
     try {
-      if (USE_GATEWAY_CHAT) {
-        const gw = await sendViaGateway(inputMessage)
-        const assistantMessage = {
-          role: 'assistant',
-          content: gw.response,
-          timestamp: new Date().toISOString(),
-          metadata: { model: 'GatewayRouterV0' }
-        }
-        setMessages(prev => [...prev, assistantMessage])
-      } else {
-        const response = await sendWithSmartAgent(inputMessage)
-        const assistantMessage = {
-          role: 'assistant',
-          content: response.data.response,
-          timestamp: response.data.timestamp || new Date().toISOString(),
-          metadata: {
-            model: response.data.model_used,
-            tokens: response.data.tokens_used,
-            task_type: response.data.task_type,
-            agent_path: response.data.agent_path,
-            iterations: response.data.metadata?.total_iterations,
-            code: response.data.code,
-            files: response.data.files,
-            file_path: response.data.file_path,
-            project_structure: response.data.project_structure,
-            main_file: response.data.main_file,
-            server_running: response.data.server_running,
-            server_url: response.data.server_url,
-            language: response.data.language,
-            web_screenshots: response.data.web_screenshots || response.data.metadata?.web_screenshots || [],
-            web_current_url: response.data.web_current_url || response.data.metadata?.web_current_url || '',
-            web_autonomous: response.data.web_autonomous || response.data.metadata?.web_autonomous || false,
-            web_actions_count: response.data.metadata?.web_actions_count || 0
+      const response = await sendWithSmartAgent(inputMessage)
+      const desktopResult = response.data.metadata?.desktop_result || response.data.artifacts?.desktop_result || null
+      let fileContent = null
+      let fileContentPath = null
+      if (desktopResult?.completed_steps) {
+        for (const step of desktopResult.completed_steps) {
+          if (step.tool_name === 'read_file' && step.success && step.response?.result?.content) {
+            fileContent = step.response.result.content
+            fileContentPath = step.response.result.path || ''
+            break
           }
         }
-        setMessages(prev => [...prev, assistantMessage])
-        if (!conversationId && response.data.conversation_id) {
-          setConversationId(response.data.conversation_id)
-        }
-        loadConversationList()
       }
+
+      const assistantMessage = {
+        role: 'assistant',
+        content: response.data.response,
+        timestamp: response.data.timestamp || new Date().toISOString(),
+        metadata: {
+          model: response.data.model_used,
+          tokens: response.data.tokens_used,
+          task_type: response.data.task_type,
+          agent_path: response.data.agent_path,
+          iterations: response.data.metadata?.total_iterations,
+          code: response.data.code,
+          files: response.data.files,
+          file_path: response.data.file_path,
+          project_structure: response.data.project_structure,
+          main_file: response.data.main_file,
+          server_running: response.data.server_running,
+          server_url: response.data.server_url,
+          language: response.data.language,
+          web_screenshots: response.data.web_screenshots || response.data.metadata?.web_screenshots || [],
+          web_current_url: response.data.web_current_url || response.data.metadata?.web_current_url || '',
+          web_autonomous: response.data.web_autonomous || response.data.metadata?.web_autonomous || false,
+          web_actions_count: response.data.metadata?.web_actions_count || 0,
+          plan: response.data.plan,
+          execution_trace: response.data.execution_trace || [],
+          approval_state: response.data.approval_state || null,
+          clarification_state: response.data.clarification_state || null,
+          artifacts: response.data.artifacts || null,
+          file_content: fileContent,
+          file_content_path: fileContentPath,
+        }
+      }
+      setMessages(prev => [...prev, assistantMessage])
+      if (response.data.approval_state?.status === 'required') {
+        setTaskApprovalPending({
+          approvalId: response.data.approval_state.approval_id,
+          reason: response.data.approval_state.reason || 'Approval required.',
+          affectedSteps: response.data.approval_state.affected_steps || [],
+          taskType: response.data.task_type
+        })
+      }
+      if (!conversationId && response.data.conversation_id) {
+        setConversationId(response.data.conversation_id)
+      }
+      loadConversationList()
     } catch (err) {
       setError(err.response?.data?.detail || err.message || 'Failed to send message.')
       setMessages(prev => prev.slice(0, -1))
@@ -224,6 +232,9 @@ function ChatInterface() {
           setProgress('⚠️ Permission needed...')
           handleWebAgentPermission(data)
         }
+        else if (data.type === 'approval_required') {
+          setProgress('⚠️ Approval needed...')
+        }
         else if (data.type === 'complete') { finalResult = data.result; ws.close() }
         else if (data.type === 'error') { reject(new Error(data.message)); ws.close() }
       }
@@ -252,6 +263,11 @@ function ChatInterface() {
               server_url: finalResult.server_url,
               language: finalResult.language,
               metadata: finalResult.metadata,
+              plan: finalResult.plan,
+              execution_trace: finalResult.execution_trace,
+              approval_state: finalResult.approval_state,
+              clarification_state: finalResult.clarification_state,
+              artifacts: finalResult.artifacts,
               web_screenshots: finalResult.web_screenshots,
               web_current_url: finalResult.web_current_url,
               web_autonomous: finalResult.web_autonomous,
@@ -262,45 +278,10 @@ function ChatInterface() {
     })
   }
 
-  const sendViaGateway = async (text) => {
-    return new Promise((resolve, reject) => {
-      const ws = new WebSocket(GATEWAY_WS_URL)
-      let assistantText = null
-      let sid = gatewaySessionId
-
-      ws.onopen = () => {
-        ws.send(JSON.stringify({ type: 'session.message', session_id: sid || undefined, text }))
-      }
-
-      ws.onmessage = (event) => {
-        const data = JSON.parse(event.data)
-        if (data.type === 'session_created' && data.session_id) {
-          sid = data.session_id
-          setGatewaySessionId(data.session_id)
-        }
-        if (data.type === 'tool_call') setProgress('🛠️ ' + (data.data?.tool || 'tool'))
-        if (data.type === 'tool_result') setProgress('✅ tool result')
-        if (data.type === 'message' && data.data?.role === 'assistant') {
-          assistantText = data.data.content
-        }
-        if (data.type === 'complete') ws.close()
-        if (data.type === 'error') { reject(new Error(data.data?.error || 'Gateway error')); ws.close() }
-      }
-
-      ws.onerror = (err) => { reject(err); ws.close() }
-      ws.onclose = () => {
-        if (assistantText != null) resolve({ response: assistantText, session_id: sid })
-        else reject(new Error('Gateway connection closed unexpectedly'))
-      }
-    })
-  }
-
   const clearConversation = () => {
     setMessages([])
     localStorage.removeItem(CONVERSATION_ID_KEY)
     setConversationId(null)
-    localStorage.removeItem('gateway_session_id')
-    setGatewaySessionId(null)
     setError(null)
     setProgress(null)
   }
@@ -322,6 +303,102 @@ function ChatInterface() {
       console.error('Permission response failed:', err)
     }
     setWebPermissionPending(null)
+  }
+
+  const respondToTaskApproval = async (approved) => {
+    if (!taskApprovalPending) return
+    setIsLoading(true)
+    setError(null)
+    try {
+      const response = await axios.post(`${API_BASE_URL}/multi-agent/approval/respond`, {
+        approval_id: taskApprovalPending.approvalId,
+        user_id: userId,
+        approved
+      })
+      const assistantMessage = {
+        role: 'assistant',
+        content: response.data.response,
+        timestamp: new Date().toISOString(),
+        metadata: {
+          task_type: response.data.task_type,
+          agent_path: response.data.agent_path,
+          approval_state: response.data.approval_state,
+          plan: response.data.plan,
+          execution_trace: response.data.execution_trace || [],
+          artifacts: response.data.artifacts || null,
+          language: response.data.language,
+          files: response.data.files,
+          file_path: response.data.file_path,
+          project_structure: response.data.project_structure,
+          main_file: response.data.main_file,
+          server_running: response.data.server_running,
+          server_url: response.data.server_url,
+          metadata: response.data.metadata,
+        }
+      }
+      setMessages(prev => [...prev, assistantMessage])
+    } catch (err) {
+      setError(err.response?.data?.detail || err.message || 'Failed to process approval.')
+    } finally {
+      setTaskApprovalPending(null)
+      setIsLoading(false)
+    }
+  }
+
+  const handleClarificationSelect = async (optionValue) => {
+    if (isLoading) return
+    const userMessage = { role: 'user', content: optionValue, timestamp: new Date().toISOString() }
+    setMessages(prev => [...prev, userMessage])
+    setIsLoading(true)
+    setError(null)
+    setProgress(null)
+
+    try {
+      const response = await sendWithSmartAgent(optionValue)
+      const desktopResult = response.data.metadata?.desktop_result || response.data.artifacts?.desktop_result || null
+      let fileContent = null
+      let fileContentPath = null
+      if (desktopResult?.completed_steps) {
+        for (const step of desktopResult.completed_steps) {
+          if (step.tool_name === 'read_file' && step.success && step.response?.result?.content) {
+            fileContent = step.response.result.content
+            fileContentPath = step.response.result.path || ''
+            break
+          }
+        }
+      }
+      const assistantMessage = {
+        role: 'assistant',
+        content: response.data.response,
+        timestamp: response.data.timestamp || new Date().toISOString(),
+        metadata: {
+          task_type: response.data.task_type,
+          agent_path: response.data.agent_path,
+          plan: response.data.plan,
+          execution_trace: response.data.execution_trace || [],
+          approval_state: response.data.approval_state || null,
+          clarification_state: response.data.clarification_state || null,
+          artifacts: response.data.artifacts || null,
+          file_content: fileContent,
+          file_content_path: fileContentPath,
+        }
+      }
+      setMessages(prev => [...prev, assistantMessage])
+      if (response.data.approval_state?.status === 'required') {
+        setTaskApprovalPending({
+          approvalId: response.data.approval_state.approval_id,
+          reason: response.data.approval_state.reason || 'Approval required.',
+          affectedSteps: response.data.approval_state.affected_steps || [],
+          taskType: response.data.task_type
+        })
+      }
+      loadConversationList()
+    } catch (err) {
+      setError(err.message || 'Failed to process selection.')
+    } finally {
+      setIsLoading(false)
+      setProgress(null)
+    }
   }
 
   const handleInputChange = (e) => {
@@ -485,9 +562,25 @@ function ChatInterface() {
           </div>
         )}
 
+        {taskApprovalPending && (
+          <div className="permission-banner">
+            <div className="permission-icon">⚠️</div>
+            <div className="permission-content">
+              <div className="permission-title">Approval Required</div>
+              <div className="permission-desc">
+                {taskApprovalPending.reason}
+              </div>
+            </div>
+            <div className="permission-actions">
+              <button className="btn-permission approve" onClick={() => respondToTaskApproval(true)}>Approve</button>
+              <button className="btn-permission deny" onClick={() => respondToTaskApproval(false)}>Deny</button>
+            </div>
+          </div>
+        )}
+
         {/* Messages */}
         <div className="chat-messages">
-          <MessageList messages={messages} isLoading={isLoading} />
+          <MessageList messages={messages} isLoading={isLoading} onClarificationSelect={handleClarificationSelect} />
           <div ref={messagesEndRef} />
         </div>
 

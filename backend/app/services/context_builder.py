@@ -57,7 +57,12 @@ class ContextBuilder:
         preferences_context = self._build_preferences_context(user_id, task_type)
         if preferences_context:
             context_parts.append(preferences_context)
-        
+
+        # === 3B. STRUCTURED PROFILE DEFAULTS (SQL) ===
+        structured_profile_context = self._build_structured_profile_context(user_id)
+        if structured_profile_context:
+            context_parts.append(structured_profile_context)
+
         # === 4. SEMANTIC MEMORY - Similar past conversations (Qdrant) ===
         semantic_context = self._build_semantic_context(user_id, current_message)
         if semantic_context:
@@ -78,6 +83,14 @@ class ContextBuilder:
         cross_conv_context = self._build_cross_conversation_context(user_id, conversation_id)
         if cross_conv_context:
             context_parts.append(cross_conv_context)
+
+        workflow_context = self._build_workflow_context(user_id)
+        if workflow_context:
+            context_parts.append(workflow_context)
+
+        outcome_context = self._build_recent_outcomes_context(user_id, task_type)
+        if outcome_context:
+            context_parts.append(outcome_context)
         
         # Combine all context
         if context_parts:
@@ -91,6 +104,7 @@ IMPORTANT INSTRUCTIONS:
 - Reference past discussions and known facts when relevant.
 - Build on user's known preferences.
 - If you know the user's name, use it naturally.
+- If the user asks for their name and a structured profile name exists, answer directly from it.
 - All context above persists across conversations - the user expects you to remember.
 """
         else:
@@ -169,6 +183,40 @@ IMPORTANT INSTRUCTIONS:
         
         except Exception as e:
             logger.error(f"Error building profile context: {e}")
+            return ""
+
+    def _build_structured_profile_context(self, user_id: str) -> str:
+        """Build explicit assistant defaults from the structured SQL profile."""
+        try:
+            profile = self.sql_memory.get_user_profile(user_id)
+            if not profile:
+                return ""
+
+            lines = []
+            display_name = profile.get("display_name") or (profile.get("metadata") or {}).get("display_name")
+            if display_name:
+                lines.append(f"- Known user name: {display_name}")
+            if profile.get("preferred_browser"):
+                lines.append(f"- Preferred browser: {profile['preferred_browser']}")
+            if profile.get("preferred_editor"):
+                lines.append(f"- Preferred editor: {profile['preferred_editor']}")
+            if profile.get("preferred_terminal"):
+                lines.append(f"- Preferred terminal: {profile['preferred_terminal']}")
+            if profile.get("favorite_apps"):
+                lines.append(f"- Favorite apps: {', '.join(profile['favorite_apps'][:8])}")
+            if profile.get("common_folders"):
+                lines.append(f"- Common folders: {', '.join(profile['common_folders'][:6])}")
+            if profile.get("common_contacts"):
+                lines.append(f"- Frequent contacts: {', '.join(profile['common_contacts'][:6])}")
+            if profile.get("named_routines"):
+                lines.append(f"- Named routines: {', '.join(profile['named_routines'][:6])}")
+
+            if not lines:
+                return ""
+
+            return "# STRUCTURED ASSISTANT DEFAULTS:\n" + "\n".join(lines)
+        except Exception as e:
+            logger.error(f"Error building structured profile context: {e}")
             return ""
     
     def _build_preferences_context(
@@ -302,6 +350,43 @@ IMPORTANT INSTRUCTIONS:
         
         except Exception as e:
             logger.error(f"Error building cross-conversation context: {e}")
+            return ""
+
+    def _build_workflow_context(self, user_id: str) -> str:
+        """Surface reusable workflows and routines to the planner."""
+        try:
+            workflows = self.sql_memory.get_saved_workflows(user_id, limit=6)
+            if not workflows:
+                return ""
+
+            lines = ["# REUSABLE WORKFLOWS AND ROUTINES:"]
+            for workflow in workflows[:6]:
+                descriptor = f"{workflow['workflow_name']} ({workflow['use_count']} runs)"
+                if workflow.get("description"):
+                    descriptor += f": {workflow['description'][:120]}"
+                lines.append(f"- {descriptor}")
+
+            return "\n".join(lines)
+        except Exception as e:
+            logger.error(f"Error building workflow context: {e}")
+            return ""
+
+    def _build_recent_outcomes_context(self, user_id: str, task_type: Optional[str] = None) -> str:
+        """Include recent successes and failures so the planner can personalize recovery."""
+        try:
+            outcomes = self.sql_memory.get_recent_task_outcomes(user_id, task_type=task_type, limit=5)
+            if not outcomes:
+                return ""
+
+            lines = ["# RECENT EXECUTION OUTCOMES:"]
+            for outcome in outcomes:
+                status = "success" if outcome.get("success") else "failed"
+                description = (outcome.get("description") or "")[:100]
+                agent_used = outcome.get("agent_used") or "unknown"
+                lines.append(f"- {status}: {description} (agent={agent_used})")
+            return "\n".join(lines)
+        except Exception as e:
+            logger.error(f"Error building recent outcomes context: {e}")
             return ""
     
     def get_memory_summary(self, user_id: str) -> Dict:

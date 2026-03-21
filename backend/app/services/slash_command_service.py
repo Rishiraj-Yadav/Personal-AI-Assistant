@@ -101,13 +101,14 @@ class SlashCommandService:
             google_connected = False
 
         status_lines = [
-            "📊 **SonarBot Status**\n",
-            f"**Model:** {settings.GROQ_MODEL}",
+            "SonarBot Status\n",
+            f"**Primary Model:** {settings.GEMINI_MODEL if settings.GOOGLE_API_KEY else settings.GROQ_MODEL}",
+            f"**Fallback / Tools:** {settings.GROQ_MODEL if settings.GROQ_API_KEY else 'Not configured'}",
             f"**Version:** {settings.APP_VERSION}",
             f"**Messages in conversation:** {msg_count}",
-            f"**Google Connected:** {'✅ Yes' if google_connected else '❌ No'}",
+            f"**Google Connected:** {'Yes' if google_connected else 'No'}",
             f"**Vector Memory:** {vm_stats.get('total_messages', '?')} messages, {vm_stats.get('total_insights', '?')} insights",
-            f"**Agents:** Router (Gemini) → Code, Desktop, Web, Email, Calendar, General (Groq)",
+            f"**Agents:** Router (Gemini) -> Code, Desktop, Web, Email, Calendar, General",
             f"**Conversation ID:** `{conversation_id}`",
         ]
 
@@ -262,3 +263,5 @@ class SlashCommandService:
 
 
 slash_command_service = SlashCommandService()
+
+

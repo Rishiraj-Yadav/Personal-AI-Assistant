@@ -11,7 +11,7 @@ from agents.base_agent import BaseAgent
 from config import settings
 
 try:
-    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+    from apscheduler.schedulers.background import BackgroundScheduler
     from apscheduler.triggers.date import DateTrigger
     from apscheduler.triggers.interval import IntervalTrigger
     from apscheduler.triggers.cron import CronTrigger
@@ -34,7 +34,7 @@ class SchedulerAgent(BaseAgent):
         self._data_file = settings.SCHEDULER_DATA_FILE
 
         if HAS_APSCHEDULER:
-            self._scheduler = AsyncIOScheduler()
+            self._scheduler = BackgroundScheduler()
             self._scheduler.start()
             logger.info("⏰ Scheduler started")
 
@@ -315,3 +315,4 @@ class SchedulerAgent(BaseAgent):
 
 # Global instance
 scheduler_agent = SchedulerAgent()
+

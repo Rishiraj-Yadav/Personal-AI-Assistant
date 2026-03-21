@@ -6,13 +6,26 @@ All agents: coding, desktop, web, general
 from typing import Dict, Any, TypedDict, List, Annotated, Optional, Callable
 from datetime import datetime, timezone, timedelta
 import operator
+import re
+import uuid
 from loguru import logger
 
 from langgraph.graph import StateGraph, END
 
 from app.agents.router_agent import router_agent
+from app.agents.orchestration_models import (
+    AgentHandoff,
+    ApprovalRequest,
+    ExecutionPlan,
+    ExecutionTraceEvent,
+    PlanStep,
+    TaskAnalysis,
+    TaskEnvelope,
+)
 from app.services.context_builder import context_builder
+from app.services.desktop_execution_service import desktop_execution_service
 from app.services.enhanced_memory_service import enhanced_memory_service
+from app.services.workflow_library_service import workflow_library_service
 from app.core.llm import llm_adapter
 from app.models import Message, MessageRole
 
@@ -157,7 +170,7 @@ class LangGraphOrchestrator:
             )
             
             # Always load recent cross-conversation messages for this user
-            # so Discord threads (same user, different thread IDs) share context
+            # so chat threads/topics (same user, different thread IDs) share context
             all_recent = self.memory_service.get_all_user_messages(
                 user_id=state['user_id'],
                 limit=10
@@ -352,35 +365,25 @@ class LangGraphOrchestrator:
     
     async def _desktop_agent_node(self, state: AgentState) -> AgentState:
         """Desktop specialist - routes to host desktop bridge OR virtual desktop based on permissions"""
-        logger.info("🖥️ Desktop Agent processing...")
-        
+        logger.info("Desktop Agent processing...")
+
         user_id = state.get('user_id', '')
-        
-        # Check desktop access tier
+
         from app.services.permission_service import permission_service
         perms = permission_service.get_permissions(user_id)
         desktop_access = perms.get('desktop_access', 'none')
-        
+
         if desktop_access == 'virtual':
             return await self._virtual_desktop_handler(state)
-        
-        # Host desktop (default for local users)
+
         try:
             from app.skills.desktop_bridge import desktop_bridge
-            
-            # Step 1: Check if desktop agent is reachable
+
             desktop_available = await desktop_bridge.check_connection()
-            
             if not desktop_available:
-                # Desktop agent not running - provide helpful error
                 state['current_output'] = (
-                    "❌ **Desktop Agent is not running!**\n\n"
-                    "To use desktop control features, please start the Desktop Agent:\n\n"
-                    "1. Open a new terminal\n"
-                    "2. Navigate to `desktop-agent/` folder\n"
-                    "3. Run: `python desktop_agent.py`\n\n"
-                    "The Desktop Agent must run on your host machine (not in Docker) "
-                    "to control your actual desktop."
+                    "Desktop Agent is not running.\n\n"
+                    "Start it from the desktop-agent folder with `python desktop_agent.py`."
                 )
                 state['final_output'] = state['current_output']
                 state['agent_path'].append('desktop_specialist')
@@ -388,187 +391,64 @@ class LangGraphOrchestrator:
                 state['desktop_action'] = 'agent_unavailable'
                 state['desktop_result'] = {'status': 'desktop_agent_not_running'}
                 return state
-            
-            # Step 2: Use LLM to parse user intent into desktop actions
-            messages = []
-            messages.append(Message(
-                role=MessageRole.SYSTEM,
-                content="""You are a Desktop Control Agent. Parse the user's request into ONE OR MORE desktop actions.
 
-Available skills and their arguments:
-- open_url: {"url": "youtube"} — Opens a website name or URL in the system's default browser. Supports well-known names like youtube, google, github, etc.
-- open_special_folder: {"folder": "desktop|documents|downloads|pictures|onedrive_root|onedrive_desktop|onedrive_documents|onedrive_pictures"} — Opens a well-known folder directly.
-- open_path: {"path": "C:\\path\\folder_or_file"} — Opens any file or folder path directly.
-- take_screenshot: {"region": null, "monitor": 1, "format": "base64"}
-- mouse_move: {"x": int, "y": int, "duration": 0.3}
-- mouse_click: {"x": int, "y": int, "button": "left|right", "clicks": 1}
-- type_text: {"text": "string", "interval": 0.05}
-- press_key: {"key": "string"}
-- press_hotkey: {"keys": ["ctrl", "c"]}
-- open_application: {"name": "app_name", "wait": false}
-- list_windows: {}
-- focus_window: {"title": "window_title"}
-- read_screen_text: {"language": "eng", "region": null}
+            step_hint = state.get('metadata', {}).get('_current_step')
+            message_callback = state.get('metadata', {}).get('_message_callback')
+            desktop_execution = await desktop_execution_service.execute(
+                user_message=state['user_message'],
+                user_id=user_id,
+                user_context=state.get('user_context', ''),
+                step_hint=step_hint,
+                message_callback=message_callback,
+                approval_granted=bool(state.get('metadata', {}).get('approval_override')),
+                resume_context=state.get('metadata', {}).get('_resume_context'),
+            )
 
-Respond EXACTLY in this format (one action per line):
-ACTION: skill_name | {"arg1": "value1", "arg2": "value2"}
-ACTION: skill_name | {"arg1": "value1"}
-EXPLANATION: Brief description of what you're doing
+            desktop_plan = desktop_execution.get('plan')
+            desktop_trace = desktop_execution.get('trace') or []
+            desktop_result = desktop_execution.get('desktop_result') or {}
+            desktop_approval_state = desktop_execution.get('approval_state') or {}
+            desktop_clarification_state = desktop_execution.get('clarification_state') or {}
 
-Examples:
-User: "open youtube"
-ACTION: open_url | {"url": "youtube"}
-EXPLANATION: Opening YouTube in the default browser
-
-User: "open my pictures folder"
-ACTION: open_special_folder | {"folder": "pictures"}
-EXPLANATION: Opening your pictures folder directly
-
-User: "open chrome"
-ACTION: open_application | {"name": "chrome", "wait": false}
-EXPLANATION: Opening Google Chrome browser
-
-User: "take a screenshot"
-ACTION: take_screenshot | {"monitor": 1, "format": "base64"}
-EXPLANATION: Taking a screenshot of your desktop
-
-User: "type hello world in notepad"
-ACTION: open_application | {"name": "notepad", "wait": true}
-ACTION: type_text | {"text": "hello world"}
-EXPLANATION: Opening Notepad and typing hello world"""
-            ))
-            
-            messages.append(Message(
-                role=MessageRole.USER,
-                content=state['user_message']
-            ))
-            
-            # Get LLM to parse the intent
-            llm_result = await self.llm.generate_response(messages)
-            llm_response = llm_result.get('response', '')
-            
-            # Step 3: Parse LLM response into actions and execute them
-            import json as json_module
-            actions = []
-            explanation = ""
-            
-            for line in llm_response.split('\n'):
-                line = line.strip()
-                if line.startswith('ACTION:'):
-                    try:
-                        parts = line[7:].strip().split('|', 1)
-                        skill_name = parts[0].strip()
-                        args = json_module.loads(parts[1].strip()) if len(parts) > 1 else {}
-                        actions.append((skill_name, args))
-                    except Exception as parse_err:
-                        logger.warning(f"⚠️ Could not parse action line: {line} - {parse_err}")
-                elif line.startswith('EXPLANATION:'):
-                    explanation = line[12:].strip()
-            
-            if not actions:
-                # LLM didn't produce parseable actions, try a simple fallback
-                msg_lower = state['user_message'].lower()
-                if any(kw in msg_lower for kw in ['screenshot', 'screen shot', 'capture screen']):
-                    actions = [('take_screenshot', {'monitor': 1, 'format': 'base64'})]
-                    explanation = 'Taking a screenshot'
-                elif any(kw in msg_lower for kw in ['open ', 'launch ', 'start ']):
-                    for kw in ['open ', 'launch ', 'start ']:
-                        if kw in msg_lower:
-                            app_name = msg_lower.split(kw, 1)[1].strip().split()[0] if msg_lower.split(kw, 1)[1].strip() else ''
-                            if app_name:
-                                actions = [('open_application', {'name': app_name, 'wait': False})]
-                                explanation = f'Opening {app_name}'
-                            break
-                elif 'type ' in msg_lower:
-                    text = state['user_message'].split('type ', 1)[1].strip() if 'type ' in state['user_message'].lower() else ''
-                    if text:
-                        actions = [('type_text', {'text': text})]
-                        explanation = 'Typing text'
-                elif any(kw in msg_lower for kw in ['click', 'mouse']):
-                    actions = [('mouse_click', {'button': 'left'})]
-                    explanation = 'Clicking mouse'
-            
-            # Step 4: Execute each action via desktop bridge
-            results = []
-            all_success = True
-            
-            for skill_name, args in actions:
-                logger.info(f"🔧 Executing desktop action: {skill_name} with args: {args}")
-                action_result = await desktop_bridge.execute_skill(skill_name, args, safe_mode=False)
-                results.append({
-                    'skill': skill_name,
-                    'args': args,
-                    'result': action_result
-                })
-                if not action_result.get('success', False):
-                    all_success = False
-                    logger.warning(f"⚠️ Action {skill_name} failed: {action_result.get('error', 'unknown')}")
-            
-            # Step 5: Build response
-            output_parts = []
-            if explanation:
-                output_parts.append(f"🖥️ **{explanation}**\n")
-            
-            for r in results:
-                skill = r['skill']
-                res = r['result']
-                if res.get('success'):
-                    result_data = res.get('result', {})
-                    if skill == 'screenshot':
-                        output_parts.append("✅ Screenshot captured successfully")
-                    elif skill == 'app_launcher':
-                        output_parts.append(f"✅ Application launched: {r['args'].get('app', 'unknown')}")
-                    elif skill == 'keyboard_control':
-                        action = r['args'].get('action', '')
-                        if action == 'type':
-                            output_parts.append("✅ Typed text successfully")
-                        elif action == 'press':
-                            output_parts.append(f"✅ Key pressed: {r['args'].get('key', '')}")
-                        elif action == 'hotkey':
-                            output_parts.append(f"✅ Hotkey pressed: {'+'.join(r['args'].get('keys', []))}")
-                        else:
-                            output_parts.append("✅ Keyboard action completed")
-                    elif skill == 'mouse_control':
-                        output_parts.append(f"✅ Mouse action completed: {r['args'].get('action', 'click')}")
-                    elif skill == 'window_manager':
-                        action = r['args'].get('action', '')
-                        if action == 'list' and isinstance(result_data, dict):
-                            windows = result_data.get('windows', [])
-                            output_parts.append(f"✅ Found {len(windows)} windows")
-                            for w in windows[:10]:
-                                if isinstance(w, dict):
-                                    output_parts.append(f"  - {w.get('title', 'Unknown')}")
-                        else:
-                            output_parts.append(f"✅ Window action completed: {action}")
-                    else:
-                        output_parts.append(f"✅ {skill} executed successfully")
-                else:
-                    error_msg = res.get('error', 'Unknown error')
-                    output_parts.append(f"❌ {skill} failed: {error_msg}")
-            
-            if not actions:
-                output_parts.append("⚠️ Could not determine the desktop action from your request. Try being more specific, e.g. 'open chrome', 'take a screenshot', 'type hello world'.")
-            
-            state['current_output'] = '\n'.join(output_parts)
+            state['current_output'] = desktop_execution.get('output', '')
             state['final_output'] = state['current_output']
             state['agent_path'].append('desktop_specialist')
-            state['success'] = all_success
-            state['desktop_action'] = 'executed'
-            state['desktop_result'] = {'actions': len(actions), 'results': [{'skill': r['skill'], 'success': r['result'].get('success')} for r in results]}
-            
-            logger.info(f"✅ Desktop actions complete: {len(actions)} actions, success={all_success}")
-        
+            state['success'] = desktop_execution.get('success', False)
+            state['desktop_action'] = 'executed' if state['success'] else 'failed'
+            state['desktop_result'] = desktop_result
+            state['metadata'] = {
+                **state.get('metadata', {}),
+                'desktop_plan': desktop_plan.model_dump() if hasattr(desktop_plan, 'model_dump') else desktop_plan,
+                'desktop_execution_trace': [
+                    event.model_dump() if hasattr(event, 'model_dump') else event
+                    for event in desktop_trace
+                ],
+                'desktop_evidence': desktop_result.get('evidence', []),
+                '_approval_state': desktop_approval_state,
+                '_clarification_state': desktop_clarification_state,
+                '_specialist_trace_events': desktop_trace,
+            }
+            if desktop_plan and getattr(desktop_plan, 'workflow_key', None):
+                state['metadata']['workflow_key'] = desktop_plan.workflow_key
+                state['metadata']['workflow_name'] = desktop_plan.workflow_name
+                state['metadata']['workflow_source'] = desktop_plan.workflow_source
+
+            logger.info(
+                f"Desktop execution finished with "
+                f"{desktop_result.get('steps_completed', 0)}/{desktop_result.get('steps_total', 0)} verified steps"
+            )
+
         except Exception as e:
-            logger.error(f"❌ Desktop agent error: {e}")
+            logger.error(f"Desktop agent error: {e}")
             import traceback
             logger.error(traceback.format_exc())
             state['current_output'] = f"Desktop control error: {str(e)}"
             state['final_output'] = state['current_output']
             state['errors'].append(f"Desktop agent error: {str(e)}")
             state['success'] = False
-        
+
         return state
-    
+
     async def _virtual_desktop_handler(self, state: AgentState) -> AgentState:
         """Handle desktop actions in a virtual Xvfb sandbox for remote users."""
         logger.info("🖥️ Virtual Desktop handler for remote user...")
@@ -688,41 +568,189 @@ EXPLANATION: Opening Notepad and typing hello world"""
     async def _web_autonomous_agent_node(self, state: AgentState) -> AgentState:
         """
         Autonomous Web Agent — Perplexity Comet-style browser automation.
-        
-        Capabilities:
-        - Navigate to any URL and understand page content
-        - Take screenshots and read DOM to comprehend pages
-        - Execute multi-step browsing tasks autonomously
-        - Ask for user permission before sensitive actions
-        - Extract and summarize information from web pages
-        - Integrate with memory for personalized web browsing
+
+        Strategy:
+        1. Try the Desktop Agent's live browser first (visible on user's screen).
+        2. If the Desktop Agent is unavailable, fall back to the headless
+           web_agent_service running in Docker.
+        3. If the live browser reports a sensitive-action-blocked error,
+           create an approval request so the user can approve/deny via the
+           Web UI or Telegram.
         """
         logger.info("🌐 Web Autonomous Agent processing...")
-        
+
+        user_id = state['user_id']
+        user_message = state['user_message']
+
+        def _live_browser_looks_failed(actions: list, response_text: str) -> bool:
+            """True if Playwright on the host failed; backend should use headless fallback."""
+            blob = (response_text or "").lower()
+            phrases = (
+                "failed to open browser",
+                "browser failed",
+                "could not open the browser",
+                "playwright is not installed",
+                "no usable browser",
+                "could not launch",
+                "browser launch failed",
+                "underlying issue",
+                "cannot resolve",
+            )
+            if any(p in blob for p in phrases):
+                return True
+            opens = [a for a in (actions or []) if a.get("tool") == "open_browser"]
+            if opens:
+                if any(a.get("success") for a in opens):
+                    return False
+                return True
+            return False
+
         try:
+            from app.skills.desktop_bridge import desktop_bridge
+
+            desktop_available = await desktop_bridge.check_connection()
+
+            if desktop_available:
+                logger.info("🖥️ Desktop Agent available — using LIVE browser")
+                result = await desktop_bridge.execute_nl_command(
+                    f"Open the browser and complete this web task: {user_message}",
+                    timeout_seconds=120,
+                )
+
+                actions = result.get("actions_taken", [])
+                response_text = result.get("response", "")
+
+                if _live_browser_looks_failed(actions, response_text):
+                    logger.warning(
+                        "Live Playwright on the host failed — falling back to headless web agent in Docker"
+                    )
+                    from app.services.web_agent_service import web_agent_service
+
+                    conversation_history = state.get('conversation_history', [])
+                    user_context = state.get('user_context', '')
+                    callback = state.get('metadata', {}).get('_message_callback')
+                    headless = await web_agent_service.execute_task(
+                        user_message=user_message,
+                        user_id=user_id,
+                        conversation_history=[
+                            msg for msg in conversation_history if isinstance(msg, dict)
+                        ],
+                        user_context=user_context,
+                        message_callback=callback,
+                    )
+                    note = (
+                        "The on-screen (Playwright) browser on your PC could not start, "
+                        "so this run used the **headless browser inside Docker** instead. "
+                        "To fix the live window: in the same terminal/venv you use for the Desktop Agent, run "
+                        "`pip install playwright` then `python -m playwright install chromium`, "
+                        "then restart `desktop_agent.py`.\n\n"
+                    )
+                    state['current_output'] = note + (headless.get('output') or '')
+                    state['final_output'] = state['current_output']
+                    state['agent_path'].append('web_autonomous_agent')
+                    state['success'] = headless.get('success', False)
+                    state['web_screenshots'] = headless.get('screenshots', [])
+                    state['web_actions'] = headless.get('actions_taken', [])
+                    state['web_current_url'] = headless.get('current_url', '')
+                    state['web_permission_needed'] = headless.get('permission_needed') or {}
+                    state['metadata'] = {
+                        **state.get('metadata', {}),
+                        'web_screenshots': headless.get('screenshots', [])[-1:],
+                        'web_actions_count': len(headless.get('actions_taken', [])),
+                        'web_current_url': headless.get('current_url', ''),
+                        'web_autonomous': True,
+                        'web_live_browser': False,
+                        'web_fallback_headless': True,
+                    }
+                    return state
+
+                screenshots = []
+                for action in actions:
+                    preview = action.get("result_preview", "")
+                    if "screenshot" in preview.lower() and "base64" in preview.lower():
+                        screenshots.append(preview)
+
+                sensitive_blocked = any(
+                    "sensitive_action_blocked" in str(a.get("result_preview", "")).lower()
+                    for a in actions
+                ) or "sensitive_action_blocked" in response_text.lower()
+
+                if sensitive_blocked:
+                    logger.warning("🔒 Sensitive action blocked by live browser — requesting approval")
+                    state['current_output'] = (
+                        "The live browser detected a sensitive page (login, payment, or password fields). "
+                        "User approval is required before continuing.\n\n"
+                        f"Details: {response_text}"
+                    )
+                    state['final_output'] = state['current_output']
+                    state['agent_path'].append('web_autonomous_agent')
+                    state['success'] = False
+                    state['web_permission_needed'] = {
+                        "reason": "Sensitive page detected by live browser",
+                        "details": response_text,
+                    }
+
+                    state['metadata'] = {
+                        **state.get('metadata', {}),
+                        'web_autonomous': True,
+                        'web_live_browser': True,
+                        'web_sensitive_blocked': True,
+                        'approval_required': True,
+                        'approval_reason': (
+                            "The browser encountered a sensitive page "
+                            "(password fields, payment form, or login page). "
+                            "Please approve to continue."
+                        ),
+                    }
+                    return state
+
+                state['current_output'] = response_text or "Web task completed via live browser."
+                state['final_output'] = state['current_output']
+                state['agent_path'].append('web_autonomous_agent')
+                state['success'] = result.get("success", False)
+                state['web_screenshots'] = screenshots
+                state['web_actions'] = actions
+                state['web_current_url'] = ""
+                state['web_permission_needed'] = {}
+
+                state['metadata'] = {
+                    **state.get('metadata', {}),
+                    'web_screenshots': screenshots[-1:] if screenshots else [],
+                    'web_actions_count': len(actions),
+                    'web_autonomous': True,
+                    'web_live_browser': True,
+                }
+
+                if user_id and result.get("success"):
+                    self.memory_service.learn_from_behavior(user_id, {
+                        'task_type': 'web_autonomous',
+                        'success': True,
+                        'actions_count': len(actions),
+                        'live_browser': True,
+                    })
+
+                logger.info(
+                    f"✅ Live browser task complete: {len(actions)} actions"
+                )
+                return state
+
+            logger.info("🐳 Desktop Agent unavailable — falling back to headless browser")
             from app.services.web_agent_service import web_agent_service
-            
-            user_id = state['user_id']
-            user_message = state['user_message']
+
             conversation_history = state.get('conversation_history', [])
             user_context = state.get('user_context', '')
-            
-            # Progress callback — forward to message_callback if available
             callback = state.get('metadata', {}).get('_message_callback')
-            
-            # Execute the autonomous web task
+
             result = await web_agent_service.execute_task(
                 user_message=user_message,
                 user_id=user_id,
                 conversation_history=[
-                    msg for msg in conversation_history
-                    if isinstance(msg, dict)
+                    msg for msg in conversation_history if isinstance(msg, dict)
                 ],
                 user_context=user_context,
                 message_callback=callback,
             )
-            
-            # Set outputs
+
             state['current_output'] = result.get('output', 'Web task completed.')
             state['final_output'] = state['current_output']
             state['agent_path'].append('web_autonomous_agent')
@@ -731,17 +759,16 @@ EXPLANATION: Opening Notepad and typing hello world"""
             state['web_actions'] = result.get('actions_taken', [])
             state['web_current_url'] = result.get('current_url', '')
             state['web_permission_needed'] = result.get('permission_needed') or {}
-            
-            # Store metadata for frontend
+
             state['metadata'] = {
                 **state.get('metadata', {}),
-                'web_screenshots': result.get('screenshots', [])[-1:],  # last screenshot
+                'web_screenshots': result.get('screenshots', [])[-1:],
                 'web_actions_count': len(result.get('actions_taken', [])),
                 'web_current_url': result.get('current_url', ''),
                 'web_autonomous': True,
+                'web_live_browser': False,
             }
-            
-            # Learn from web browsing behavior
+
             if user_id and result.get('success'):
                 self.memory_service.learn_from_behavior(user_id, {
                     'task_type': 'web_autonomous',
@@ -749,9 +776,9 @@ EXPLANATION: Opening Notepad and typing hello world"""
                     'actions_count': len(result.get('actions_taken', [])),
                     'url_visited': result.get('current_url', ''),
                 })
-            
-            logger.info(f"✅ Web autonomous complete: {len(result.get('actions_taken', []))} actions")
-        
+
+            logger.info(f"✅ Headless web task complete: {len(result.get('actions_taken', []))} actions")
+
         except Exception as e:
             logger.error(f"❌ Web autonomous agent error: {e}")
             import traceback
@@ -760,62 +787,115 @@ EXPLANATION: Opening Notepad and typing hello world"""
             state['final_output'] = state['current_output']
             state['errors'].append(f"Web autonomous error: {str(e)}")
             state['success'] = False
-        
+
         return state
+
+    def _format_recent_conversation_history(
+        self,
+        conversation_history: list,
+        limit: int = 6,
+        max_chars: int = 500,
+    ) -> str:
+        """Build a compact recent-history block for follow-up specialist prompts."""
+        if not conversation_history:
+            return ""
+
+        lines = []
+        for msg in conversation_history[-limit:]:
+            role = msg.get('role', 'user') if isinstance(msg, dict) else 'user'
+            content = msg.get('content', '') if isinstance(msg, dict) else str(msg)
+            if len(content) > max_chars:
+                content = content[:max_chars] + "..."
+            lines.append(f"{role}: {content}")
+        return "\n".join(lines)
+
+    def _extract_latest_draft_id(self, conversation_history: list) -> str:
+        """Extract the most recent Gmail draft id from prior assistant messages."""
+        if not conversation_history:
+            return ""
+
+        for msg in reversed(conversation_history):
+            content = msg.get('content', '') if isinstance(msg, dict) else str(msg)
+            match = re.search(r"Draft ID:\s*(\S+)", content, re.IGNORECASE)
+            if match:
+                return match.group(1).strip('_').strip('*')
+        return ""
+
+    def _is_email_send_confirmation(self, user_message: str) -> bool:
+        """Detect short follow-ups that mean 'send the previously drafted email'."""
+        normalized = user_message.strip().lower()
+        exact_phrases = {
+            "send it",
+            "yes send",
+            "send the email",
+            "send the draft",
+            "go ahead",
+            "go ahead and send",
+            "yes, send the email",
+        }
+        return normalized in exact_phrases
+
+    def _is_explicit_send_email_request(self, user_message: str) -> bool:
+        """Detect a first-turn request that clearly asks to send, not just draft, an email."""
+        message_lower = user_message.lower()
+        return any(
+            phrase in message_lower
+            for phrase in [
+                "send email",
+                "send an email",
+                "send the email",
+                "send mail",
+            ]
+        )
     
     async def _email_agent_node(self, state: AgentState) -> AgentState:
-        """Email specialist - Gmail operations via LLM intent parsing"""
-        logger.info("📧 Email Agent processing...")
-        
+        """Email specialist - Gmail operations via LLM intent parsing."""
+        logger.info("Email Agent processing...")
+
         try:
             from app.services.gmail_service import gmail_service
             from app.services.google_auth_service import google_auth_service
-            
+
             user_id = state['user_id']
             user_message = state['user_message']
             conversation_history = state.get('conversation_history', [])
-            
-            # Check if Google is connected
+            history_text = self._format_recent_conversation_history(conversation_history)
+            approval_override = bool(state.get('metadata', {}).get('approval_override'))
+            recent_draft_id = self._extract_latest_draft_id(conversation_history)
+
             if not google_auth_service.is_connected(user_id):
                 state['current_output'] = (
-                    "📧 **Google Account Not Connected**\n\n"
-                    "To use email features, please connect your Google account first:\n"
-                    "Click **Connect Google** in the settings panel, or say 'connect google'.\n\n"
-                    "Once connected, I can:\n"
+                    "Email features require a connected Google account.\n\n"
+                    "Connect Google from the settings panel, then I can:\n"
                     "- Read your inbox\n"
-                    "- Send emails (with your approval)\n"
+                    "- Send emails with confirmation\n"
                     "- Search emails\n"
                     "- Check unread count\n"
-                    "- Archive/trash messages"
+                    "- Archive or trash messages"
                 )
                 state['final_output'] = state['current_output']
                 state['agent_path'].append('email_specialist')
                 state['success'] = False
                 return state
-            
-            # Build conversation context so LLM knows about previous drafts
-            history_text = ""
-            if conversation_history:
-                recent = conversation_history[-6:]  # Last 6 messages for context
-                for msg in recent:
-                    role = msg.get('role', 'user')
-                    content = msg.get('content', '')
-                    # Truncate long messages but keep draft IDs visible
-                    if len(content) > 500:
-                        content = content[:500] + "..."
-                    history_text += f"{role}: {content}\n"
-            
-            # Use LLM to parse email intent
-            messages = [
-                Message(
-                    role=MessageRole.SYSTEM,
-                    content="""You are an Email Agent. Parse the user's request into a Gmail action.
+
+            action = ""
+            args = {}
+            explanation = ""
+
+            if self._is_email_send_confirmation(user_message) and recent_draft_id:
+                action = 'SEND_DRAFT'
+                explanation = "Sending the previously composed draft."
+            else:
+                messages = [
+                    Message(
+                        role=MessageRole.SYSTEM,
+                        content="""You are an Email Agent. Parse the user's request into a Gmail action.
 
 Available actions:
 - LIST_EMAILS: List inbox emails. Args: {"query": "", "max_results": 10}
 - READ_EMAIL: Read specific email. Args: {"message_id": "..."}
 - SEARCH_EMAILS: Search with query. Args: {"query": "from:alice subject:report", "max_results": 10}
-- COMPOSE_EMAIL: Draft an email (NOT send). Args: {"to": "email@example.com", "subject": "...", "body": "..."}
+- COMPOSE_EMAIL: Prepare an email. Args: {"to": "email@example.com", "subject": "...", "body": "..."}
 - SEND_DRAFT: Send a previously composed draft. Args: {"draft_id": "..."}
 - UNREAD_COUNT: Check unread count. Args: {}
 - MARK_READ: Mark email as read. Args: {"message_id": "..."}
@@ -823,249 +903,268 @@ Available actions:
 - TRASH: Trash email. Args: {"message_id": "..."}
 
 CRITICAL RULES:
-1. For COMPOSE_EMAIL: Create a professional email body. NEVER send directly — always draft first.
-2. For SEND_DRAFT: When user says "send it", "yes send", "go ahead", "send the email", "send the draft" — use SEND_DRAFT. You do NOT need to provide the draft_id — the system will extract it automatically from conversation history. Just use ARGS: {}
-3. For SEARCH: Use Gmail query syntax (from:, to:, subject:, is:unread, after:, before:, has:attachment, in:sent, in:inbox)
-4. If user just says "check email" or "any new email" → LIST_EMAILS with query "is:unread"
-5. If user asks about "last sent email", "emails I sent", "my sent mail" → use SEARCH_EMAILS with query "in:sent" and max_results 1-5.
-6. For READ_EMAIL: ONLY use a real message_id from a previous LIST_EMAILS/SEARCH_EMAILS result. NEVER invent or guess a message_id.
-7. If user asks about a specific email but you don't have its message_id, use SEARCH_EMAILS first to find it.
-
-Examples:
-User: "send it" (after composing a draft)
-ACTION: SEND_DRAFT
-ARGS: {}
-EXPLANATION: Sending the previously composed draft
-
-User: "what was the last email I sent"
-ACTION: SEARCH_EMAILS
-ARGS: {"query": "in:sent", "max_results": 1}
-EXPLANATION: Finding the last sent email
+1. For COMPOSE_EMAIL: create a professional email body with complete to, subject, and body fields.
+2. If APPROVAL_GRANTED is true and the user explicitly asked to send the email, still return COMPOSE_EMAIL with complete fields so the system can send it immediately.
+3. For SEND_DRAFT: when user says "send it", "yes send", "go ahead", "send the email", or "send the draft", use SEND_DRAFT. The system will extract the draft id from history.
+4. For SEARCH: use Gmail query syntax (from:, to:, subject:, is:unread, after:, before:, has:attachment, in:sent, in:inbox).
+5. If user just says "check email" or "any new email", use LIST_EMAILS with query "is:unread".
+6. If user asks about "last sent email", "emails I sent", or "my sent mail", use SEARCH_EMAILS with query "in:sent" and max_results 1-5.
+7. For READ_EMAIL: only use a real message_id from a previous LIST_EMAILS or SEARCH_EMAILS result. Never invent or guess it.
+8. If user asks about a specific email but you do not have its message_id, use SEARCH_EMAILS first to find it.
+9. Keep Gmail, inbox, email, and mail requests in EMAIL. Do not treat them like generic web browsing.
 
 Respond EXACTLY in this format:
 ACTION: <action_name>
 ARGS: <json_args>
-EXPLANATION: <brief description>"""
-                ),
-                Message(
-                    role=MessageRole.USER,
-                    content=f"CONVERSATION HISTORY:\n{history_text}\n\nCURRENT REQUEST: {user_message}"
-                    if history_text else user_message
-                )
-            ]
-            
-            llm_result = await self.llm.generate_response(messages)
-            llm_response = llm_result.get('response', '')
-            
-            import json as json_module
-            action = ""
-            args = {}
-            explanation = ""
-            
-            for line in llm_response.split('\n'):
-                line = line.strip()
-                if line.startswith('ACTION:'):
-                    action = line.split(':', 1)[1].strip().upper()
-                elif line.startswith('ARGS:'):
-                    try:
-                        args = json_module.loads(line.split(':', 1)[1].strip())
-                    except:
-                        args = {}
-                elif line.startswith('EXPLANATION:'):
-                    explanation = line.split(':', 1)[1].strip()
-            
-            # Execute the parsed action
+EXPLANATION: <brief description>""",
+                    ),
+                    Message(
+                        role=MessageRole.USER,
+                        content=(
+                            f"APPROVAL_GRANTED: {approval_override}\n\n"
+                            f"CONVERSATION HISTORY:\n{history_text}\n\n"
+                            f"CURRENT REQUEST: {user_message}"
+                        )
+                        if history_text
+                        else f"APPROVAL_GRANTED: {approval_override}\nCURRENT REQUEST: {user_message}",
+                    ),
+                ]
+
+                llm_result = await self.llm.generate_response(messages)
+                llm_response = llm_result.get('response', '')
+
+                import json as json_module
+
+                for line in llm_response.split('\n'):
+                    line = line.strip()
+                    if line.startswith('ACTION:'):
+                        action = line.split(':', 1)[1].strip().upper()
+                    elif line.startswith('ARGS:'):
+                        try:
+                            args = json_module.loads(line.split(':', 1)[1].strip())
+                        except Exception:
+                            args = {}
+                    elif line.startswith('EXPLANATION:'):
+                        explanation = line.split(':', 1)[1].strip()
+
             output = ""
-            
-            if action == 'LIST_EMAILS' or action == 'SEARCH_EMAILS':
+
+            if action in {'LIST_EMAILS', 'SEARCH_EMAILS'}:
                 query = args.get('query', '')
                 max_results = args.get('max_results', 10)
                 emails = gmail_service.list_emails(user_id, query=query, max_results=max_results)
-                
+
                 if emails:
-                    output = f"📧 **{len(emails)} emails found**"
+                    output = f"Found {len(emails)} emails"
                     if query:
                         output += f" (query: {query})"
                     output += "\n\n"
-                    for i, email in enumerate(emails, 1):
-                        unread = "🔵 " if email['is_unread'] else ""
-                        output += f"{i}. {unread}**{email['subject']}**\n"
+                    for index, email in enumerate(emails, 1):
+                        unread = "[unread] " if email['is_unread'] else ""
+                        output += f"{index}. {unread}{email['subject']}\n"
                         output += f"   From: {email['from']} | {email['date']}\n"
                         output += f"   {email['snippet'][:100]}\n\n"
                 else:
-                    output = "📭 No emails found matching your criteria."
-            
+                    output = "No emails found matching your criteria."
+
             elif action == 'READ_EMAIL':
                 msg_id = args.get('message_id', '')
-                # Validate: real Gmail message IDs are hex strings, not words
-                if msg_id and len(msg_id) > 5 and ' ' not in msg_id and not any(w in msg_id.lower() for w in ['last', 'sent', 'first', 'recent', 'email', 'mail', 'message']):
+                if msg_id and len(msg_id) > 5 and ' ' not in msg_id and not any(
+                    word in msg_id.lower() for word in ['last', 'sent', 'first', 'recent', 'email', 'mail', 'message']
+                ):
                     email = gmail_service.read_email(user_id, msg_id)
-                    output = f"📧 **{email['subject']}**\n"
-                    output += f"From: {email['from']}\n"
-                    output += f"To: {email['to']}\n"
-                    output += f"Date: {email['date']}\n\n"
-                    output += f"{email['body'][:2000]}"
+                    output = (
+                        f"{email['subject']}\n"
+                        f"From: {email['from']}\n"
+                        f"To: {email['to']}\n"
+                        f"Date: {email['date']}\n\n"
+                        f"{email['body'][:2000]}"
+                    )
                     if email['attachments']:
-                        output += f"\n\n📎 Attachments: {', '.join(a['filename'] for a in email['attachments'])}"
+                        output += f"\n\nAttachments: {', '.join(a['filename'] for a in email['attachments'])}"
                 else:
-                    # Fallback: search for it instead
-                    logger.warning(f"⚠️ Invalid message_id '{msg_id}', falling back to search")
+                    logger.warning(f"Invalid message_id '{msg_id}', falling back to sent-mail lookup")
                     emails = gmail_service.list_emails(user_id, query='in:sent', max_results=1)
                     if emails:
                         first = emails[0]
                         email = gmail_service.read_email(user_id, first['id'])
-                        output = f"📧 **Your last sent email:**\n\n"
-                        output += f"**{email['subject']}**\n"
-                        output += f"From: {email['from']}\n"
-                        output += f"To: {email['to']}\n"
-                        output += f"Date: {email['date']}\n\n"
-                        output += f"{email['body'][:2000]}"
+                        output = (
+                            "Your last sent email:\n\n"
+                            f"{email['subject']}\n"
+                            f"From: {email['from']}\n"
+                            f"To: {email['to']}\n"
+                            f"Date: {email['date']}\n\n"
+                            f"{email['body'][:2000]}"
+                        )
                     else:
-                        output = "📭 No sent emails found."
-            
+                        output = "No sent emails found."
+
             elif action == 'COMPOSE_EMAIL':
                 to = args.get('to', '')
                 subject = args.get('subject', '')
                 body = args.get('body', '')
-                
+                should_send_direct = approval_override and self._is_explicit_send_email_request(user_message)
+
                 if to and subject:
-                    draft = gmail_service.compose_draft(
-                        user_id=user_id, to=to, subject=subject, body=body
-                    )
-                    output = (
-                        f"📝 **Email Draft Created**\n\n"
-                        f"**To:** {to}\n"
-                        f"**Subject:** {subject}\n"
-                        f"**Body:**\n{body}\n\n"
-                        f"---\n"
-                        f"⚠️ **This email has NOT been sent yet.** It's saved as a draft.\n"
-                        f"Say **\"send it\"** or **\"yes, send the email\"** to send it.\n"
-                        f"Say **\"cancel\"** or **\"don't send\"** to discard.\n\n"
-                        f"_Draft ID: {draft['draft_id']}_"
-                    )
+                    if should_send_direct:
+                        result = gmail_service.send_email_direct(
+                            user_id=user_id,
+                            to=to,
+                            subject=subject,
+                            body=body,
+                        )
+                        output = (
+                            "Email sent successfully.\n\n"
+                            f"To: {to}\n"
+                            f"Subject: {subject}\n"
+                            f"Message ID: {result.get('message_id', 'sent')}"
+                        )
+                    else:
+                        draft = gmail_service.compose_draft(
+                            user_id=user_id,
+                            to=to,
+                            subject=subject,
+                            body=body,
+                        )
+                        output = (
+                            "Email draft created.\n\n"
+                            f"To: {to}\n"
+                            f"Subject: {subject}\n"
+                            f"Body:\n{body}\n\n"
+                            "This email has not been sent yet. Say \"send it\" to send the draft.\n\n"
+                            f"Draft ID: {draft['draft_id']}"
+                        )
                 else:
-                    output = "❌ Missing required fields. Please provide: to (email), subject, and what you want to say."
-            
+                    output = "Missing required fields. Please provide the recipient, subject, and what you want to say."
+
             elif action == 'SEND_DRAFT':
-                # Always extract draft_id from conversation history (don't rely on LLM)
-                import re
-                draft_id = ''
-                if conversation_history:
-                    for msg in reversed(conversation_history):
-                        content = msg.get('content', '')
-                        match = re.search(r'Draft ID:\s*(\S+)', content)
-                        if match:
-                            draft_id = match.group(1).strip('_').strip('*')
-                            logger.info(f"📧 Found draft_id from history: {draft_id}")
-                            break
-                
-                # Fallback: use LLM-provided draft_id only if it looks like a real ID
+                draft_id = recent_draft_id
                 if not draft_id:
                     llm_draft_id = args.get('draft_id', '')
                     if llm_draft_id and len(llm_draft_id) > 5 and ' ' not in llm_draft_id:
                         draft_id = llm_draft_id
-                
+
                 if draft_id:
                     result = gmail_service.send_draft(user_id, draft_id)
-                    output = f"✅ **Email Sent Successfully!**\n\nMessage ID: {result.get('message_id', 'sent')}"
+                    output = f"Email sent successfully.\n\nMessage ID: {result.get('message_id', 'sent')}"
                 else:
-                    output = "❌ Could not find a draft to send. Please compose an email first."
-            
+                    output = "Could not find a draft to send. Please compose an email first."
+
             elif action == 'UNREAD_COUNT':
                 count = gmail_service.get_unread_count(user_id)
-                output = f"📬 You have **{count}** unread email{'s' if count != 1 else ''}."
-            
+                output = f"You have {count} unread email{'s' if count != 1 else ''}."
+
             elif action == 'MARK_READ':
                 msg_id = args.get('message_id', '')
                 if msg_id:
                     gmail_service.mark_as_read(user_id, msg_id)
-                    output = "✅ Email marked as read."
+                    output = "Email marked as read."
                 else:
-                    output = "❌ No message ID provided."
-            
+                    output = "No message ID provided."
+
             elif action == 'ARCHIVE':
                 msg_id = args.get('message_id', '')
                 if msg_id:
                     gmail_service.archive_email(user_id, msg_id)
-                    output = "✅ Email archived."
+                    output = "Email archived."
                 else:
-                    output = "❌ No message ID provided."
-            
+                    output = "No message ID provided."
+
             elif action == 'TRASH':
                 msg_id = args.get('message_id', '')
                 if msg_id:
                     gmail_service.trash_email(user_id, msg_id)
-                    output = "🗑️ Email moved to trash."
+                    output = "Email moved to trash."
                 else:
-                    output = "❌ No message ID provided."
-            
+                    output = "No message ID provided."
+
             else:
-                # Default: check unread + show recent
                 count = gmail_service.get_unread_count(user_id)
                 emails = gmail_service.list_emails(user_id, query="is:unread", max_results=5)
-                output = f"📬 You have **{count}** unread emails.\n\n"
+                output = f"You have {count} unread emails.\n\n"
                 if emails:
-                    for i, email in enumerate(emails, 1):
-                        output += f"{i}. **{email['subject']}** from {email['from']}\n"
-            
+                    for index, email in enumerate(emails, 1):
+                        output += f"{index}. {email['subject']} from {email['from']}\n"
+
             if explanation:
                 output = f"*{explanation}*\n\n{output}"
-            
+
             state['current_output'] = output
             state['final_output'] = output
             state['agent_path'].append('email_specialist')
             state['success'] = True
-            
-            logger.info(f"✅ Email action complete: {action}")
-        
-        except PermissionError as e:
-            state['current_output'] = f"🔒 {str(e)}"
+
+            logger.info(f"Email action complete: {action or 'DEFAULT'}")
+
+        except PermissionError as exc:
+            state['current_output'] = f"Permission error: {str(exc)}"
             state['final_output'] = state['current_output']
             state['agent_path'].append('email_specialist')
             state['success'] = False
-        except Exception as e:
-            logger.error(f"❌ Email agent error: {e}")
-            state['current_output'] = f"Email error: {str(e)}"
+        except Exception as exc:
+            logger.error(f"Email agent error: {exc}")
+            state['current_output'] = f"Email error: {str(exc)}"
             state['final_output'] = state['current_output']
-            state['errors'].append(f"Email agent error: {str(e)}")
+            state['errors'].append(f"Email agent error: {str(exc)}")
             state['success'] = False
-        
+
         return state
-    
+
     async def _calendar_agent_node(self, state: AgentState) -> AgentState:
-        """Calendar specialist - Google Calendar operations via LLM intent parsing"""
-        logger.info("📅 Calendar Agent processing...")
-        
+        """Calendar specialist - Google Calendar and reminder operations."""
+        logger.info("Calendar Agent processing...")
+
         try:
             from app.services.calendar_service import calendar_service
             from app.services.scheduler_service import scheduler_service
             from app.services.google_auth_service import google_auth_service
-            
+
             user_id = state['user_id']
             user_message = state['user_message']
-            
-            # Check if Google is connected
+            conversation_history = state.get('conversation_history', [])
+            history_text = self._format_recent_conversation_history(conversation_history)
+            message_lower = user_message.lower().strip()
+
             if not google_auth_service.is_connected(user_id):
                 state['current_output'] = (
-                    "📅 **Google Account Not Connected**\n\n"
-                    "To use calendar features, please connect your Google account first:\n"
-                    "Click **Connect Google** in the settings panel.\n\n"
-                    "Once connected, I can:\n"
+                    "Calendar features require a connected Google account.\n\n"
+                    "Connect Google from the settings panel, then I can:\n"
                     "- Show your schedule\n"
                     "- Create events\n"
                     "- Set reminders\n"
-                    "- Check free/busy times"
+                    "- Check free and busy times"
                 )
                 state['final_output'] = state['current_output']
                 state['agent_path'].append('calendar_specialist')
                 state['success'] = False
                 return state
-            
-            # Use LLM to parse calendar intent
-            messages = [
-                Message(
-                    role=MessageRole.SYSTEM,
-                    content="""You are a Calendar Agent. Parse the user's request into a calendar action.
+
+            action = ""
+            args = {}
+            explanation = ""
+
+            if any(phrase in message_lower for phrase in [
+                "what's on my calendar today",
+                "what is on my calendar today",
+                "today's schedule",
+                "my schedule today",
+                "calendar today",
+            ]):
+                action = 'TODAY_EVENTS'
+                explanation = "Checking today's schedule."
+            elif any(phrase in message_lower for phrase in [
+                "list reminders",
+                "show reminders",
+                "my reminders",
+                "scheduled jobs",
+            ]):
+                action = 'LIST_REMINDERS'
+                explanation = "Listing your active reminders and scheduled jobs."
+            else:
+                messages = [
+                    Message(
+                        role=MessageRole.SYSTEM,
+                        content="""You are a Calendar Agent. Parse the user's request into a calendar action.
 
 Available actions:
 - LIST_EVENTS: List upcoming events. Args: {"days": 7, "max_results": 10}
@@ -1076,84 +1175,90 @@ Available actions:
 - SET_REMINDER: Set a one-time reminder. Args: {"description": "Take medicine", "run_at": "2026-03-08T09:00:00"}
 - LIST_REMINDERS: Show active reminders. Args: {}
 
-IMPORTANT:
-- For CREATE_EVENT: Always include both start_time and end_time in ISO format (without timezone offset — the time_zone field handles it). Default time_zone is "Asia/Kolkata".
-- If user says "tomorrow at 3pm", calculate the actual date.
-- For SET_REMINDER: run_at should be a future datetime in ISO format.
-- Current date context will be in the user message.
+IMPORTANT RULES:
+1. For CREATE_EVENT: always include both start_time and end_time in ISO format without timezone offset. Use time_zone for the location timezone and default it to Asia/Kolkata.
+2. If the user says "tomorrow at 3pm" or similar relative time phrases, calculate the actual future date.
+3. For SET_REMINDER: run_at must be a future ISO datetime.
+4. Use conversation history for follow-up requests like "schedule it", "add it to calendar", or "set the reminder".
+5. Keep Google Calendar, meetings, schedules, and reminders in CALENDAR. Do not treat them like generic web browsing.
+6. If the user asks for reminders or scheduled jobs, prefer LIST_REMINDERS or SET_REMINDER instead of creating a calendar event.
 
 Respond EXACTLY:
 ACTION: <action_name>
 ARGS: <json_args>
-EXPLANATION: Brief description"""
-                ),
-                Message(
-                    role=MessageRole.USER,
-                    content=f"Current date: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}. User says: {user_message}"
-                )
-            ]
-            
-            llm_result = await self.llm.generate_response(messages)
-            llm_response = llm_result.get('response', '')
-            
-            import json as json_module
-            action = ""
-            args = {}
-            explanation = ""
-            
-            for line in llm_response.split('\n'):
-                line = line.strip()
-                if line.startswith('ACTION:'):
-                    action = line.split(':', 1)[1].strip().upper()
-                elif line.startswith('ARGS:'):
-                    try:
-                        args = json_module.loads(line.split(':', 1)[1].strip())
-                    except:
-                        args = {}
-                elif line.startswith('EXPLANATION:'):
-                    explanation = line.split(':', 1)[1].strip()
-            
+EXPLANATION: Brief description""",
+                    ),
+                    Message(
+                        role=MessageRole.USER,
+                        content=(
+                            f"Current date: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n\n"
+                            f"CONVERSATION HISTORY:\n{history_text}\n\n"
+                            f"CURRENT REQUEST: {user_message}"
+                        )
+                        if history_text
+                        else f"Current date: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\nUser says: {user_message}",
+                    ),
+                ]
+
+                llm_result = await self.llm.generate_response(messages)
+                llm_response = llm_result.get('response', '')
+
+                import json as json_module
+
+                for line in llm_response.split('\n'):
+                    line = line.strip()
+                    if line.startswith('ACTION:'):
+                        action = line.split(':', 1)[1].strip().upper()
+                    elif line.startswith('ARGS:'):
+                        try:
+                            args = json_module.loads(line.split(':', 1)[1].strip())
+                        except Exception:
+                            args = {}
+                    elif line.startswith('EXPLANATION:'):
+                        explanation = line.split(':', 1)[1].strip()
+
             output = ""
-            
+
             if action == 'LIST_EVENTS':
                 days = args.get('days', 7)
                 max_results = args.get('max_results', 10)
                 now = datetime.now(timezone.utc)
                 events = calendar_service.list_events(
-                    user_id, 
+                    user_id,
                     time_min=now,
                     time_max=now + timedelta(days=days),
-                    max_results=max_results
+                    max_results=max_results,
                 )
-                
+
                 if events:
-                    output = f"📅 **{len(events)} events in the next {days} days:**\n\n"
-                    for i, evt in enumerate(events, 1):
-                        output += f"{i}. **{evt['summary']}**\n"
-                        output += f"   📍 {evt['location']}\n" if evt['location'] else ""
-                        output += f"   🕐 {evt['start']} → {evt['end']}\n"
-                        if evt['attendees']:
-                            output += f"   👥 {', '.join(a['email'] for a in evt['attendees'][:3])}\n"
+                    output = f"{len(events)} events in the next {days} days:\n\n"
+                    for index, event in enumerate(events, 1):
+                        output += f"{index}. {event['summary']}\n"
+                        if event['location']:
+                            output += f"   Location: {event['location']}\n"
+                        output += f"   {event['start']} -> {event['end']}\n"
+                        if event['attendees']:
+                            output += f"   Attendees: {', '.join(a['email'] for a in event['attendees'][:3])}\n"
                         output += "\n"
                 else:
-                    output = f"📭 No events in the next {days} days."
-            
+                    output = f"No events in the next {days} days."
+
             elif action == 'TODAY_EVENTS':
                 events = calendar_service.get_today_events(user_id)
                 if events:
-                    output = f"📅 **Today's Schedule ({len(events)} events):**\n\n"
-                    for i, evt in enumerate(events, 1):
-                        output += f"{i}. **{evt['summary']}** — {evt['start']} to {evt['end']}\n"
-                        if evt['location']:
-                            output += f"   📍 {evt['location']}\n"
+                    output = f"Today's schedule ({len(events)} events):\n\n"
+                    for index, event in enumerate(events, 1):
+                        output += f"{index}. {event['summary']} - {event['start']} to {event['end']}\n"
+                        if event['location']:
+                            output += f"   Location: {event['location']}\n"
                 else:
-                    output = "📭 No events scheduled for today. You're free!"
-            
+                    output = "No events scheduled for today."
+
             elif action == 'CREATE_EVENT':
                 summary = args.get('summary', '')
                 start = args.get('start_time', '')
                 end = args.get('end_time', '')
-                
+
                 if summary and start and end:
                     event = calendar_service.create_event(
                         user_id=user_id,
@@ -1167,81 +1272,89 @@ EXPLANATION: Brief description"""
                         time_zone=args.get('time_zone', 'Asia/Kolkata'),
                     )
                     output = (
-                        f"✅ **Event Created!**\n\n"
-                        f"📌 **{event['summary']}**\n"
-                        f"🕐 {event['start']} → {event['end']}\n"
-                        f"🔗 [Open in Google Calendar]({event['html_link']})"
+                        "Event created.\n\n"
+                        f"{event['summary']}\n"
+                        f"{event['start']} -> {event['end']}\n"
+                        f"Open in Google Calendar: {event['html_link']}"
                     )
                 else:
-                    output = "❌ Missing info. Please provide: event title, start time, and end time."
-            
+                    output = "Missing information. Please provide the event title, start time, and end time."
+
+            elif action == 'UPDATE_EVENT':
+                event_id = args.get('event_id', '')
+                updates = args.get('updates', {})
+                if event_id and updates:
+                    result = calendar_service.update_event(user_id=user_id, event_id=event_id, updates=updates)
+                    output = f"Event updated successfully: {result.get('summary', event_id)}"
+                else:
+                    output = "Missing event id or update details."
+
             elif action == 'DELETE_EVENT':
                 event_id = args.get('event_id', '')
                 if event_id:
                     calendar_service.delete_event(user_id, event_id)
-                    output = "🗑️ Event deleted."
+                    output = "Event deleted."
                 else:
-                    output = "❌ No event ID provided."
-            
+                    output = "No event ID provided."
+
             elif action == 'SET_REMINDER':
-                desc = args.get('description', '')
+                description = args.get('description', '')
                 run_at_str = args.get('run_at', '')
-                if desc and run_at_str:
+                if description and run_at_str:
                     run_at = datetime.fromisoformat(run_at_str)
                     if run_at.tzinfo is None:
                         run_at = run_at.replace(tzinfo=timezone.utc)
-                    result = scheduler_service.add_reminder(
+                    scheduler_service.add_reminder(
                         user_id=user_id,
-                        description=desc,
+                        description=description,
                         run_at=run_at,
                     )
-                    output = f"⏰ **Reminder Set!**\n\n📌 {desc}\n🕐 {run_at.strftime('%Y-%m-%d %H:%M')}"
+                    output = f"Reminder set.\n\n{description}\n{run_at.strftime('%Y-%m-%d %H:%M')}"
                 else:
-                    output = "❌ Please provide what to remind you about and when."
-            
+                    output = "Please provide both what to remind you about and when."
+
             elif action == 'LIST_REMINDERS':
                 jobs = scheduler_service.list_jobs(user_id)
                 if jobs:
-                    output = f"⏰ **{len(jobs)} active reminders/jobs:**\n\n"
-                    for j in jobs:
-                        output += f"- **{j['description']}** ({j['type']}) — next: {j['next_run'] or 'N/A'}\n"
+                    output = f"{len(jobs)} active reminders or jobs:\n\n"
+                    for job in jobs:
+                        output += f"- {job['description']} ({job['type']}) - next: {job['next_run'] or 'N/A'}\n"
                 else:
-                    output = "📭 No active reminders or scheduled jobs."
-            
+                    output = "No active reminders or scheduled jobs."
+
             else:
-                # Default: show today's schedule
                 events = calendar_service.get_today_events(user_id)
                 if events:
-                    output = f"📅 **Today's Schedule:**\n\n"
-                    for i, evt in enumerate(events, 1):
-                        output += f"{i}. **{evt['summary']}** — {evt['start']}\n"
+                    output = "Today's schedule:\n\n"
+                    for index, event in enumerate(events, 1):
+                        output += f"{index}. {event['summary']} - {event['start']}\n"
                 else:
-                    output = "📭 Nothing on your calendar today."
-            
+                    output = "Nothing is on your calendar today."
+
             if explanation:
                 output = f"*{explanation}*\n\n{output}"
-            
+
             state['current_output'] = output
             state['final_output'] = output
             state['agent_path'].append('calendar_specialist')
             state['success'] = True
-            
-            logger.info(f"✅ Calendar action complete: {action}")
-        
-        except PermissionError as e:
-            state['current_output'] = f"🔒 {str(e)}"
+
+            logger.info(f"Calendar action complete: {action or 'DEFAULT'}")
+
+        except PermissionError as exc:
+            state['current_output'] = f"Permission error: {str(exc)}"
             state['final_output'] = state['current_output']
             state['agent_path'].append('calendar_specialist')
             state['success'] = False
-        except Exception as e:
-            logger.error(f"❌ Calendar agent error: {e}")
-            state['current_output'] = f"Calendar error: {str(e)}"
+        except Exception as exc:
+            logger.error(f"Calendar agent error: {exc}")
+            state['current_output'] = f"Calendar error: {str(exc)}"
             state['final_output'] = state['current_output']
-            state['errors'].append(f"Calendar agent error: {str(e)}")
+            state['errors'].append(f"Calendar agent error: {str(exc)}")
             state['success'] = False
-        
+
         return state
-    
+
     async def _general_agent_node(self, state: AgentState) -> AgentState:
         """General assistant"""
         logger.info("💬 General Agent processing...")
@@ -1252,6 +1365,19 @@ EXPLANATION: Brief description"""
             return state
         
         try:
+            user_message_lower = state.get('user_message', '').strip().lower()
+            if any(phrase in user_message_lower for phrase in ("what is my name", "what's my name", "do you know my name", "who am i")):
+                profile = self.memory_service.get_user_profile(state.get('user_id', ''))
+                display_name = profile.get("display_name") or (profile.get("metadata") or {}).get("display_name")
+                if display_name:
+                    state['current_output'] = f"Your name is {display_name}."
+                else:
+                    state['current_output'] = "I don't have your name stored confidently yet."
+                state['final_output'] = state['current_output']
+                state['agent_path'].append('general_assistant')
+                state['success'] = True
+                return state
+
             messages = []
             
             if state.get('user_context'):
@@ -1418,21 +1544,16 @@ EXPLANATION: Brief description"""
         
         return state
     
-    # ===== PUBLIC INTERFACE =====
-    
-    async def process(
+    def _build_initial_state(
         self,
         user_message: str,
         user_id: str,
         conversation_id: str,
-        max_iterations: int = 3,
-        message_callback: Optional[Callable] = None
-    ) -> Dict[str, Any]:
-        """Process user message through graph"""
-        logger.info(f"🚀 Processing: '{user_message[:50]}...'")
-        
-        # Initialize state
-        initial_state = {
+        max_iterations: int,
+        message_callback: Optional[Callable] = None,
+    ) -> AgentState:
+        """Build a fresh orchestration state for the new planner/executor flow."""
+        initial_state: AgentState = {
             'user_message': user_message,
             'user_id': user_id,
             'conversation_id': conversation_id,
@@ -1448,7 +1569,9 @@ EXPLANATION: Brief description"""
             'errors': [],
             'final_output': '',
             'success': False,
-            'metadata': {},
+            'metadata': {
+                'original_user_message': user_message,
+            },
             'code': '',
             'files': {},
             'language': '',
@@ -1457,54 +1580,1095 @@ EXPLANATION: Brief description"""
             'web_screenshots': [],
             'web_actions': [],
             'web_current_url': '',
-            'web_permission_needed': {}
+            'web_permission_needed': {},
         }
-        
-        # Pass message callback via metadata for agents that need it
         if message_callback:
             initial_state['metadata']['_message_callback'] = message_callback
-        
+        return initial_state
+
+    def _detect_channel(self, user_id: str) -> str:
+        """Infer request channel from user identity."""
+        if user_id.startswith("telegram_"):
+            return "telegram"
+        if user_id.startswith("web_"):
+            return "web"
+        return "api"
+
+    async def _emit_progress(
+        self,
+        message_callback: Optional[Callable],
+        event_type: str,
+        message: str,
+        **data: Any,
+    ) -> None:
+        """Forward orchestration lifecycle events to transport layers."""
+        if not message_callback:
+            return
+        payload = {"type": event_type, "message": message}
+        payload.update(data)
         try:
-            # Execute graph
-            result = await self.graph.ainvoke(initial_state)
-            
-            # Build response — drop non-serializable keys
-            extra_metadata = {
-                k: v for k, v in result.get('metadata', {}).items()
-                if not callable(v) and not k.startswith('_')
+            await message_callback(payload)
+        except Exception as exc:
+            logger.warning(f"⚠️ Progress callback failed for {event_type}: {exc}")
+
+    def _assess_approval(self, user_message: str, task_type: str) -> ApprovalRequest:
+        """Apply guarded auto-run rules at the orchestrator layer."""
+        message_lower = user_message.lower()
+        dangerous_keywords = [
+            "delete", "remove", "erase", "format", "wipe", "factory reset",
+            "shutdown", "reboot", "kill process", "terminate process", "trash",
+            "purchase", "buy", "checkout", "payment", "transfer money",
+            "deploy to production", "git push", "git commit", "revoke",
+            "archive email", "empty recycle bin",
+        ]
+        confirm_keywords = [
+            "send email", "send mail", "send message", "send it", "submit",
+            "post publicly", "publish", "share", "install", "sign in",
+            "log in", "login", "download and move", "upload",
+            "create file", "write file", "save file", "create folder",
+            "move file", "copy file", "write to", "save to",
+        ]
+        desktop_sensitive_confirm = [
+            "type password", "enter password", "paste password", "close all",
+            "close every", "send report", "open bank", "open payment",
+            "create file", "write file", "save file", "create folder",
+            "move file", "copy file", "write to", "save to",
+        ]
+        desktop_sensitive_danger = [
+            "delete file", "delete folder", "rm -rf", "format drive",
+            "remove all", "close all windows",
+        ]
+
+        safety_level = "safe"
+        reason = ""
+
+        if any(keyword in message_lower for keyword in dangerous_keywords):
+            safety_level = "dangerous"
+            reason = "The request would modify, delete, purchase, or permanently change something on your behalf."
+        elif any(keyword in message_lower for keyword in confirm_keywords):
+            safety_level = "confirm"
+            reason = "The request appears to commit an external action or change personal data."
+
+        if task_type == "desktop":
+            if any(keyword in message_lower for keyword in desktop_sensitive_danger):
+                safety_level = "dangerous"
+                reason = "The desktop action could close, delete, or alter important user data."
+            elif safety_level == "safe" and any(keyword in message_lower for keyword in desktop_sensitive_confirm):
+                safety_level = "confirm"
+                reason = "The desktop action touches sensitive personal workflows and should be confirmed first."
+            if any(keyword in message_lower for keyword in ("create file", "write file", "save file", "write to", "save to", "create folder", "move file", "copy file")):
+                safety_level = "confirm"
+                reason = "The desktop action will create, write, move, or copy files on your machine, so I need your approval first."
+
+        requires_approval = safety_level != "safe"
+        return ApprovalRequest(
+            required=requires_approval,
+            approval_level="confirm" if requires_approval else "none",
+            reason=reason,
+            safety_level=safety_level,  # type: ignore[arg-type]
+        )
+
+    def _build_task_analysis(
+        self,
+        envelope: TaskEnvelope,
+        state: AgentState,
+        approval_override: bool = False,
+    ) -> TaskAnalysis:
+        """Normalize routing, permissions, and risk into a single analysis object."""
+        from app.services.permission_service import permission_service
+
+        routing = router_agent.classify_task(
+            user_message=envelope.user_message,
+            user_context=state.get('user_context', ''),
+            conversation_history=state.get('conversation_history', []),
+        )
+        task_type = routing.get('task_type', 'general')
+        approval = self._assess_approval(envelope.user_message, task_type)
+        if approval_override:
+            approval = ApprovalRequest(required=False, approval_level="none", reason="")
+
+        allowed, access_reason = permission_service.check_agent_access(envelope.user_id, task_type)
+        rate_allowed, rate_reason = permission_service.check_rate_limit(envelope.user_id)
+
+        blocked = False
+        blocked_reason = ""
+        if not rate_allowed:
+            blocked = True
+            blocked_reason = rate_reason
+        elif not allowed:
+            blocked = True
+            blocked_reason = access_reason
+
+        risk_level = "low"
+        if approval.safety_level == "dangerous":
+            risk_level = "high"
+        elif approval.required or task_type in {"desktop", "email", "calendar", "web_autonomous"}:
+            risk_level = "medium"
+
+        return TaskAnalysis(
+            task_type=task_type,
+            confidence=routing.get('confidence', 0.0),
+            reasoning=routing.get('reasoning', ''),
+            risk_level=risk_level,
+            required_capabilities=[task_type],
+            blocked=blocked,
+            blocked_reason=blocked_reason,
+            approval=approval,
+        )
+
+    def _requires_research_step(self, user_message: str, task_type: str) -> bool:
+        """Detect when a coding request should explicitly gather web context first."""
+        if task_type != "coding":
+            return False
+        research_keywords = [
+            "research", "docs", "documentation", "latest", "compare",
+            "find the best", "look up", "search online", "github", "website",
+            "api reference", "read about",
+        ]
+        message_lower = user_message.lower()
+        return any(keyword in message_lower for keyword in research_keywords)
+
+    def _desktop_executor_handles_approval(self, user_message: str, task_type: str) -> bool:
+        """Let the desktop executor resolve exact paths before asking for approval."""
+        if task_type != "desktop":
+            return False
+        message_lower = user_message.lower()
+        return any(
+            phrase in message_lower
+            for phrase in [
+                "create file",
+                "write file",
+                "save file",
+                "write to",
+                "save to",
+                "create folder",
+                "move file",
+                "copy file",
+            ]
+        )
+
+    def _build_execution_plan(
+        self,
+        envelope: TaskEnvelope,
+        analysis: TaskAnalysis,
+        approval_override: bool = False,
+    ) -> ExecutionPlan:
+        """Create an explicit step-by-step plan before execution starts."""
+        steps: List[PlanStep] = []
+        desktop_internal_approval = (
+            self._desktop_executor_handles_approval(envelope.user_message, analysis.task_type)
+            and not approval_override
+        )
+
+        def _make_step(
+            index: int,
+            agent_type: str,
+            goal: str,
+            message: str,
+            depends_on: Optional[List[str]] = None,
+            approval_level: str = "none",
+            safety_level: str = "safe",
+            tool_name: str = "",
+            success_criteria: str = "",
+            fallback_strategy: str = "",
+            verification: Optional[Dict[str, Any]] = None,
+            recovery: Optional[Dict[str, Any]] = None,
+            retry_budget: int = 0,
+        ) -> PlanStep:
+            return PlanStep(
+                step_id=f"step-{index}",
+                agent_type=agent_type,  # type: ignore[arg-type]
+                goal=goal,
+                inputs={"message": message},
+                depends_on=depends_on or [],
+                approval_level=approval_level,  # type: ignore[arg-type]
+                safety_level=safety_level,  # type: ignore[arg-type]
+                tool_name=tool_name,
+                verification=verification or {},
+                recovery=recovery or {},
+                retry_budget=retry_budget,
+                success_criteria=success_criteria,
+                fallback_strategy=fallback_strategy,
+            )
+
+        workflow_match = workflow_library_service.match_workflow(
+            envelope.user_message,
+            envelope.user_id,
+        )
+        if workflow_match and workflow_match.get("steps"):
+            workflow_steps = [step.model_copy(deep=True) for step in workflow_match["steps"]]
+            if approval_override:
+                for workflow_step in workflow_steps:
+                    workflow_step.approval_level = "none"
+                    if workflow_step.safety_level == "confirm":
+                        workflow_step.safety_level = "safe"
+            if analysis.approval.required and not any(step.approval_level != "none" for step in workflow_steps):
+                workflow_steps[0].approval_level = analysis.approval.approval_level
+                workflow_steps[0].safety_level = analysis.approval.safety_level
+
+            affected_steps = [
+                step.step_id for step in workflow_steps if step.approval_level != "none"
+            ]
+            requires_approval = bool(affected_steps) or analysis.approval.required
+            approval_request = ApprovalRequest(
+                required=requires_approval,
+                approval_level="confirm" if requires_approval else "none",
+                reason=analysis.approval.reason or (
+                    "The workflow contains confirmation-gated steps."
+                    if affected_steps else ""
+                ),
+                affected_steps=affected_steps or (
+                    [workflow_steps[0].step_id] if requires_approval else []
+                ),
+                safety_level=analysis.approval.safety_level if analysis.approval.required else (
+                    "confirm" if affected_steps else "safe"
+                ),
+            )
+            return ExecutionPlan(
+                plan_id=str(uuid.uuid4()),
+                task_type=analysis.task_type,  # type: ignore[arg-type]
+                summary=workflow_match.get("summary") or f"Run the {analysis.task_type} workflow.",
+                steps=workflow_steps,
+                requires_approval=requires_approval,
+                approval_request=approval_request if requires_approval else None,
+                workflow_key=workflow_match.get("workflow_key"),
+                workflow_name=workflow_match.get("workflow_name"),
+                workflow_source=workflow_match.get("workflow_source", "builtin"),
+                metadata=workflow_match.get("metadata") or {},
+            )
+
+        if not analysis.blocked:
+            if self._requires_research_step(envelope.user_message, analysis.task_type):
+                steps.append(_make_step(
+                    1,
+                    "web_autonomous",
+                    "Research the requested implementation on the web before coding.",
+                    f"Research documentation and implementation guidance for: {envelope.user_message}",
+                    approval_level="none",
+                    safety_level="safe",
+                    success_criteria="Relevant references or findings are gathered.",
+                    fallback_strategy="Proceed with implementation using existing context if research is unavailable.",
+                    verification={
+                        "method": "none",
+                        "description": "Research is verified by the presence of relevant findings in the output.",
+                    },
+                    recovery={
+                        "strategy": "Fallback to coding with current repo context if web research is unavailable.",
+                    },
+                ))
+                steps.append(_make_step(
+                    2,
+                    "coding",
+                    "Implement the requested solution using the gathered context.",
+                    envelope.user_message,
+                    depends_on=["step-1"],
+                    approval_level=analysis.approval.approval_level if analysis.approval.required else "none",
+                    safety_level=analysis.approval.safety_level if analysis.approval.required else "safe",
+                    success_criteria="Code, files, and execution artifacts are produced.",
+                    fallback_strategy="Return a concrete blocking error with partial output if implementation fails.",
+                    verification={
+                        "method": "none",
+                        "description": "Implementation is verified by produced files or a concrete output.",
+                    },
+                    recovery={
+                        "strategy": "Surface the blocking implementation error and preserve partial output.",
+                    },
+                ))
+            else:
+                verification = {
+                    "method": "none",
+                    "description": "The specialist should either complete the task or return a clear failure reason.",
+                }
+                recovery = {
+                    "strategy": "Escalate to the general agent with failure context if the specialist cannot complete the task.",
+                }
+                retry_budget = 0
+                if analysis.task_type == "desktop":
+                    verification = {
+                        "method": "composite",
+                        "target": envelope.user_message,
+                        "description": "Desktop requests should be verified through observed state, evidence, and recovery.",
+                    }
+                    recovery = {
+                        "strategy": "Analyze, plan, execute, verify, and recover using the desktop executor.",
+                        "alternate_tools": ["list_windows", "get_active_window", "read_screen_text", "search_system"],
+                        "max_retries": 1,
+                    }
+                    retry_budget = 1
+                steps.append(_make_step(
+                    1,
+                    analysis.task_type,
+                    f"Execute the user's {analysis.task_type.replace('_', ' ')} request.",
+                    envelope.user_message,
+                    approval_level=(
+                        "none"
+                        if desktop_internal_approval
+                        else analysis.approval.approval_level if analysis.approval.required else "none"
+                    ),
+                    safety_level=(
+                        "safe"
+                        if desktop_internal_approval
+                        else analysis.approval.safety_level if analysis.approval.required else "safe"
+                    ),
+                    success_criteria="The specialist completes the request or returns a clear blocking error.",
+                    fallback_strategy="Escalate to the general agent with the failure context if needed.",
+                    verification=verification,
+                    recovery=recovery,
+                    retry_budget=retry_budget,
+                ))
+
+        requires_approval = analysis.approval.required and not desktop_internal_approval
+
+        if requires_approval:
+            analysis.approval.affected_steps = [
+                step.step_id for step in steps if step.approval_level != "none"
+            ]
+
+        return ExecutionPlan(
+            plan_id=str(uuid.uuid4()),
+            task_type=analysis.task_type,  # type: ignore[arg-type]
+            summary=f"Analyze the request, then execute it through the {analysis.task_type} specialist flow.",
+            steps=steps,
+            requires_approval=requires_approval,
+            approval_request=analysis.approval if requires_approval else None,
+            workflow_source="dynamic",
+            metadata={"desktop_internal_approval": desktop_internal_approval},
+        )
+
+    def _extract_artifacts(self, state: AgentState) -> Dict[str, Any]:
+        """Collect serializable artifacts from the current state."""
+        metadata = state.get('metadata', {})
+        safe_metadata = {
+            key: value
+            for key, value in metadata.items()
+            if not callable(value) and not key.startswith('_')
+        }
+        return {
+            'files': state.get('files') or {},
+            'language': state.get('language') or '',
+            'project_path': safe_metadata.get('project_path', ''),
+            'project_type': safe_metadata.get('project_type', ''),
+            'server_running': safe_metadata.get('server_running', False),
+            'server_url': safe_metadata.get('server_url', ''),
+            'web_screenshots': state.get('web_screenshots', []),
+            'web_actions': state.get('web_actions', []),
+            'web_current_url': state.get('web_current_url', ''),
+            'desktop_action': state.get('desktop_action', ''),
+            'desktop_result': state.get('desktop_result', {}),
+            'desktop_plan': safe_metadata.get('desktop_plan', {}),
+            'desktop_execution_trace': safe_metadata.get('desktop_execution_trace', []),
+            'desktop_evidence': safe_metadata.get('desktop_evidence', []),
+            'workflow_key': safe_metadata.get('workflow_key', ''),
+            'workflow_name': safe_metadata.get('workflow_name', ''),
+            'workflow_source': safe_metadata.get('workflow_source', ''),
+        }
+
+    async def _execute_plan_step(self, step: PlanStep, state: AgentState) -> AgentState:
+        """Dispatch a single plan step to the correct specialist node."""
+        step_message = step.inputs.get("message", state.get('user_message', ''))
+        state['metadata'] = {
+            **state.get('metadata', {}),
+            '_current_step': step.model_dump(),
+        }
+        state['user_message'] = step_message
+        state['task_type'] = step.agent_type
+
+        handlers = {
+            'coding': self._code_agent_node,
+            'desktop': self._desktop_agent_node,
+            'web': self._web_agent_node,
+            'web_autonomous': self._web_autonomous_agent_node,
+            'email': self._email_agent_node,
+            'calendar': self._calendar_agent_node,
+            'general': self._general_agent_node,
+        }
+        handler = handlers.get(step.agent_type, self._general_agent_node)
+        return await handler(state)
+
+    def _build_handoff_step(
+        self,
+        current_step: PlanStep,
+        target_agent: str,
+        handoff_context: str,
+        plan: ExecutionPlan,
+    ) -> PlanStep:
+        """Create a follow-up step after a specialist requests a handoff."""
+        return PlanStep(
+            step_id=f"step-{len(plan.steps) + 1}",
+            agent_type=target_agent,  # type: ignore[arg-type]
+            goal=f"Continue execution via {target_agent.replace('_', ' ')} handoff.",
+            inputs={"message": handoff_context},
+            depends_on=[current_step.step_id],
+            approval_level="none",
+            success_criteria="The downstream specialist completes the requested follow-up.",
+            fallback_strategy="Return the prior result and report that the handoff could not be completed.",
+        )
+
+    async def _execute_plan(
+        self,
+        state: AgentState,
+        plan: ExecutionPlan,
+        message_callback: Optional[Callable] = None,
+    ) -> tuple[AgentState, List[ExecutionTraceEvent], Dict[str, Any], Dict[str, Any]]:
+        """Run the explicit plan, capturing step traces and orchestrator-managed handoffs."""
+        execution_trace: List[ExecutionTraceEvent] = []
+        approval_state = {"status": "not_required", "reason": ""}
+        clarification_state = {"status": "not_required", "reason": "", "options": []}
+        completed_steps: set[str] = set()
+        step_index = 0
+        state['metadata'] = {
+            **state.get('metadata', {}),
+            'workflow_key': plan.workflow_key or '',
+            'workflow_name': plan.workflow_name or '',
+            'workflow_source': plan.workflow_source,
+        }
+
+        while step_index < len(plan.steps):
+            step = plan.steps[step_index]
+            if any(dep not in completed_steps for dep in step.depends_on):
+                step_index += 1
+                continue
+
+            if step.approval_level != "none":
+                step.status = "blocked"
+                approval_state = {
+                    "status": "required",
+                    "reason": plan.approval_request.reason if plan.approval_request else "Approval required.",
+                    "affected_steps": plan.approval_request.affected_steps if plan.approval_request else [step.step_id],
+                    "safety_level": step.safety_level,
+                    "workflow_name": plan.workflow_name,
+                }
+                execution_trace.append(ExecutionTraceEvent(
+                    event_type="approval_required",
+                    phase="execution",
+                    step_id=step.step_id,
+                    agent_type=step.agent_type,
+                    success=False,
+                    message=approval_state["reason"],
+                    data={"approval_state": approval_state},
+                ))
+                await self._emit_progress(
+                    message_callback,
+                    "approval_required",
+                    approval_state["reason"],
+                    step_id=step.step_id,
+                    agent_type=step.agent_type,
+                    approval_state=approval_state,
+                )
+                break
+
+            step.status = "running"
+            execution_trace.append(ExecutionTraceEvent(
+                event_type="step_started",
+                phase="execution",
+                step_id=step.step_id,
+                agent_type=step.agent_type,
+                success=None,
+                message=step.goal,
+                data={"inputs": step.inputs},
+            ))
+            await self._emit_progress(
+                message_callback,
+                "step_started",
+                step.goal,
+                step_id=step.step_id,
+                agent_type=step.agent_type,
+                step=step.model_dump(),
+            )
+
+            state = await self._execute_plan_step(step, state)
+            specialist_trace_events = state.get('metadata', {}).pop('_specialist_trace_events', [])
+            for specialist_event in specialist_trace_events:
+                if isinstance(specialist_event, ExecutionTraceEvent):
+                    execution_trace.append(specialist_event)
+                elif isinstance(specialist_event, dict):
+                    execution_trace.append(ExecutionTraceEvent(**specialist_event))
+
+            specialist_approval_state = state.get('metadata', {}).pop('_approval_state', {}) or {}
+            specialist_clarification_state = state.get('metadata', {}).pop('_clarification_state', {}) or {}
+            if specialist_clarification_state.get("status") == "required":
+                step.status = "blocked"
+                clarification_state = specialist_clarification_state
+            elif specialist_approval_state.get("status") == "required":
+                step.status = "blocked"
+                approval_state = specialist_approval_state
+            else:
+                step.status = "completed" if state.get('success') else "failed"
+
+            artifacts = self._extract_artifacts(state)
+            execution_trace.append(ExecutionTraceEvent(
+                event_type="step_completed",
+                phase="execution",
+                step_id=step.step_id,
+                agent_type=step.agent_type,
+                success=state.get('success', False),
+                message=state.get('current_output', '')[:500],
+                data={"artifacts": artifacts},
+            ))
+            await self._emit_progress(
+                message_callback,
+                "step_completed",
+                state.get('current_output', '')[:500] or f"Completed {step.agent_type}",
+                step_id=step.step_id,
+                agent_type=step.agent_type,
+                success=state.get('success', False),
+                artifacts=artifacts,
+                step=step.model_dump(),
+            )
+
+            if clarification_state.get("status") == "required":
+                execution_trace.append(ExecutionTraceEvent(
+                    event_type="clarification_required",
+                    phase="execution",
+                    step_id=step.step_id,
+                    agent_type=step.agent_type,
+                    success=False,
+                    message=clarification_state.get("reason", clarification_state.get("question", "Clarification required.")),
+                    data={"clarification_state": clarification_state},
+                ))
+                await self._emit_progress(
+                    message_callback,
+                    "clarification_required",
+                    clarification_state.get("question", clarification_state.get("reason", "Clarification required.")),
+                    step_id=step.step_id,
+                    agent_type=step.agent_type,
+                    clarification_state=clarification_state,
+                )
+                break
+
+            if approval_state.get("status") == "required":
+                execution_trace.append(ExecutionTraceEvent(
+                    event_type="approval_required",
+                    phase="execution",
+                    step_id=step.step_id,
+                    agent_type=step.agent_type,
+                    success=False,
+                    message=approval_state["reason"],
+                    data={"approval_state": approval_state},
+                ))
+                await self._emit_progress(
+                    message_callback,
+                    "approval_required",
+                    approval_state["reason"],
+                    step_id=step.step_id,
+                    agent_type=step.agent_type,
+                    approval_state=approval_state,
+                )
+                break
+
+            if not state.get('success', False):
+                break
+
+            completed_steps.add(step.step_id)
+            state.get('metadata', {}).pop('_current_step', None)
+            state['conversation_history'] = (
+                state.get('conversation_history', [])
+                + [{'role': 'user', 'content': step.inputs.get("message", '')}]
+                + (
+                    [{'role': 'assistant', 'content': state.get('current_output', '')}]
+                    if state.get('current_output') else []
+                )
+            )[-20:]
+
+            # Allow specialists to request another specialist through the orchestrator.
+            state['metadata'].pop('_cross_agent_done', None)
+            state['metadata'].pop('_cross_target', None)
+            state['metadata'].pop('_cross_context', None)
+            state = await self._cross_agent_check_node(state)
+            cross_target = state.get('metadata', {}).get('_cross_target')
+            cross_context = state.get('metadata', {}).get('_cross_context')
+
+            if cross_target and cross_context:
+                handoff_step = self._build_handoff_step(step, cross_target, cross_context, plan)
+                plan.steps.append(handoff_step)
+                handoff = AgentHandoff(
+                    from_agent=step.agent_type,
+                    to_agent=cross_target,  # type: ignore[arg-type]
+                    reason="Specialist requested a follow-up action.",
+                    context=cross_context,
+                )
+                execution_trace.append(ExecutionTraceEvent(
+                    event_type="handoff",
+                    phase="execution",
+                    step_id=step.step_id,
+                    agent_type=step.agent_type,
+                    success=True,
+                    message=f"Handoff to {cross_target}",
+                    data={"handoff": handoff.model_dump(), "new_step": handoff_step.model_dump()},
+                ))
+                await self._emit_progress(
+                    message_callback,
+                    "handoff",
+                    f"Routing follow-up work to {cross_target.replace('_', ' ')}.",
+                    handoff=handoff.model_dump(),
+                    step=handoff_step.model_dump(),
+                )
+                state['metadata'].pop('_cross_target', None)
+                state['metadata'].pop('_cross_context', None)
+
+            step_index += 1
+
+        return state, execution_trace, approval_state, clarification_state
+
+    async def _persist_interaction(
+        self,
+        envelope: TaskEnvelope,
+        response_text: str,
+        task_type: str,
+        agent_path: List[str],
+        success: bool,
+        execution_trace: List[ExecutionTraceEvent],
+        plan: Optional[ExecutionPlan] = None,
+        artifacts: Optional[Dict[str, Any]] = None,
+        approval_state: Optional[Dict[str, Any]] = None,
+        clarification_state: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Persist the user request and assistant response once per orchestrated turn."""
+        try:
+            trace_payload = [event.model_dump() for event in execution_trace]
+            interaction_user_message = envelope.metadata.get('interaction_user_message', envelope.user_message)
+            self.memory_service.save_message(
+                conversation_id=envelope.conversation_id,
+                user_id=envelope.user_id,
+                role='user',
+                content=interaction_user_message,
+                metadata={'channel': envelope.channel},
+            )
+            self.memory_service.save_message(
+                conversation_id=envelope.conversation_id,
+                user_id=envelope.user_id,
+                role='assistant',
+                content=response_text,
+                metadata={
+                    'task_type': task_type,
+                    'agent_path': agent_path,
+                    'success': success,
+                    'execution_trace': trace_payload,
+                    'plan': plan.model_dump() if plan else None,
+                    'artifacts': artifacts or {},
+                    'approval_state': approval_state or {},
+                    'clarification_state': clarification_state or {},
+                },
+            )
+            self.memory_service.save_conversation_exchange(
+                conversation_id=envelope.conversation_id,
+                user_id=envelope.user_id,
+                user_message=interaction_user_message,
+                assistant_response=response_text,
+                metadata={'task_type': task_type},
+            )
+            self.memory_service.save_task(
+                envelope.user_id,
+                {
+                    'conversation_id': envelope.conversation_id,
+                    'task_type': task_type,
+                    'description': interaction_user_message,
+                    'agent_used': 'planner_executor',
+                    'iterations': len([event for event in execution_trace if event.event_type == 'step_completed']),
+                    'success': success,
+                }
+            )
+            if plan and plan.workflow_key and (approval_state or {}).get('status') != 'required' and (clarification_state or {}).get('status') != 'required':
+                self.memory_service.record_workflow_run(
+                    envelope.user_id,
+                    plan.workflow_key,
+                    plan.workflow_name or plan.summary,
+                    success=success,
+                    parameters=plan.metadata,
+                    description=plan.summary,
+                    is_builtin=plan.workflow_source in {'builtin', 'heuristic'},
+                )
+        except Exception as exc:
+            logger.error(f"❌ Unified persistence error: {exc}")
+
+    def _format_clarification_prompt(self, clarification_state: Dict[str, Any]) -> str:
+        question = clarification_state.get("question") or clarification_state.get("reason") or "Clarification required."
+        options = clarification_state.get("options") or []
+        if not options or "\n" in question:
+            return question
+        lines = [question]
+        for option in options[:5]:
+            lines.append(f"{option.get('index')}. {option.get('path') or option.get('label')}")
+        return "\n".join(lines)
+
+    async def _build_clarification_response(
+        self,
+        *,
+        envelope: TaskEnvelope,
+        clarification_state: Dict[str, Any],
+        message_callback: Optional[Callable],
+        prompt_prefix: str = "",
+    ) -> Dict[str, Any]:
+        prompt = self._format_clarification_prompt(clarification_state)
+        output = f"{prompt_prefix}\n\n{prompt}".strip() if prompt_prefix else prompt
+        execution_trace = [
+            ExecutionTraceEvent(
+                event_type="clarification_required",
+                phase="analysis",
+                message=clarification_state.get("reason", clarification_state.get("question", "Clarification required.")),
+                agent_type=clarification_state.get("task_type", "desktop"),
+                success=False,
+                data={"clarification_state": clarification_state},
+            )
+        ]
+        response = {
+            'success': False,
+            'output': output,
+            'task_type': clarification_state.get("task_type", "desktop"),
+            'confidence': 1.0,
+            'agent_path': ['clarification_pending'],
+            'code': None,
+            'files': None,
+            'language': None,
+            'file_path': '',
+            'project_structure': None,
+            'main_file': None,
+            'project_type': '',
+            'server_running': False,
+            'server_url': '',
+            'server_port': None,
+            'plan': None,
+            'execution_trace': [event.model_dump() for event in execution_trace],
+            'approval_state': {'status': 'not_required', 'reason': '', 'affected_steps': []},
+            'clarification_state': clarification_state,
+            'artifacts': {},
+            'metadata': {
+                'channel': envelope.channel,
+                'routing_reason': 'Waiting for the user to disambiguate an exact folder or file target.',
+                'risk_level': 'medium',
+                'iterations': 0,
+                'errors': [],
+            },
+        }
+        await self._persist_interaction(
+            envelope=envelope,
+            response_text=output,
+            task_type=response['task_type'],
+            agent_path=response['agent_path'],
+            success=False,
+            execution_trace=execution_trace,
+            plan=None,
+            artifacts={},
+            approval_state=response['approval_state'],
+            clarification_state=clarification_state,
+        )
+        await self._emit_progress(
+            message_callback,
+            "final",
+            output[:500],
+            result=response,
+        )
+        return response
+
+    async def _maybe_resume_pending_clarification(
+        self,
+        *,
+        user_message: str,
+        user_id: str,
+        conversation_id: str,
+        max_iterations: int,
+        message_callback: Optional[Callable],
+        approval_override: bool,
+    ) -> Optional[Dict[str, Any]]:
+        from app.services.clarification_service import clarification_service
+
+        pending = clarification_service.get_pending_request(
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )
+        if not pending:
+            return None
+
+        envelope = TaskEnvelope(
+            user_message=user_message,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            channel=self._detect_channel(user_id),
+            metadata={"clarification_for": pending.user_message},
+        )
+
+        selected_option = clarification_service.parse_response(pending, user_message)
+        clarification_state = {
+            "status": "required",
+            "reason": pending.question,
+            "question": pending.question,
+            "options": pending.options,
+            "clarification_id": pending.clarification_id,
+            "original_request": pending.user_message,
+            "task_type": pending.task_type,
+        }
+        if not selected_option:
+            return await self._build_clarification_response(
+                envelope=envelope,
+                clarification_state=clarification_state,
+                message_callback=message_callback,
+                prompt_prefix="I still need you to choose one of the exact matches before I continue.",
+            )
+
+        clarification_service.resolve(
+            pending.clarification_id,
+            selected_option=selected_option,
+        )
+        clarification_service.remove(pending.clarification_id)
+
+        resume_context = {
+            **(pending.metadata.get("resume_context") or {}),
+            "selected_option": selected_option,
+            "selected_path": selected_option.get("value") or selected_option.get("path"),
+        }
+        await self._emit_progress(
+            message_callback,
+            "clarification_resolved",
+            f"Using {resume_context.get('selected_path', 'the selected path')}.",
+            clarification_state={**clarification_state, "status": "resolved", "selected_option": selected_option},
+        )
+        return await self.process(
+            user_message=pending.user_message,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            max_iterations=max_iterations,
+            message_callback=message_callback,
+            approval_override=approval_override,
+            resume_context=resume_context,
+            interaction_user_message=user_message,
+        )
+
+    # ===== PUBLIC INTERFACE =====
+    
+    # ===== PUBLIC INTERFACE =====
+    
+    async def process(
+        self,
+        user_message: str,
+        user_id: str,
+        conversation_id: str,
+        max_iterations: int = 3,
+        message_callback: Optional[Callable] = None,
+        approval_override: bool = False,
+        resume_context: Optional[Dict[str, Any]] = None,
+        interaction_user_message: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Process a request through the unified planner/executor architecture."""
+        logger.info(f"🚀 Processing: '{user_message[:50]}...'")
+
+        if not resume_context:
+            clarification_result = await self._maybe_resume_pending_clarification(
+                user_message=user_message,
+                user_id=user_id,
+                conversation_id=conversation_id,
+                max_iterations=max_iterations,
+                message_callback=message_callback,
+                approval_override=approval_override,
+            )
+            if clarification_result is not None:
+                return clarification_result
+
+        state = self._build_initial_state(
+            user_message=user_message,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            max_iterations=max_iterations,
+            message_callback=message_callback,
+        )
+        state['metadata']['approval_override'] = approval_override
+        state['metadata']['_resume_context'] = resume_context or {}
+        envelope = TaskEnvelope(
+            user_message=user_message,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            channel=self._detect_channel(user_id),
+            metadata={"interaction_user_message": interaction_user_message or user_message},
+        )
+
+        try:
+            await self._emit_progress(
+                message_callback,
+                "analysis_started",
+                "Analyzing the request and building execution context.",
+                channel=envelope.channel,
+            )
+
+            state = await self._load_context_node(state)
+            analysis = self._build_task_analysis(
+                envelope,
+                state,
+                approval_override=approval_override,
+            )
+            state['task_type'] = analysis.task_type
+            state['confidence'] = analysis.confidence
+            state['routing_reason'] = analysis.reasoning
+
+            plan = self._build_execution_plan(
+                envelope,
+                analysis,
+                approval_override=approval_override,
+            )
+            await self._emit_progress(
+                message_callback,
+                "plan_ready",
+                plan.summary,
+                plan=plan.model_dump(),
+                task_type=analysis.task_type,
+                confidence=analysis.confidence,
+            )
+
+            execution_trace: List[ExecutionTraceEvent] = [
+                ExecutionTraceEvent(
+                    event_type="analysis_completed",
+                    phase="analysis",
+                    message=analysis.reasoning or f"Detected {analysis.task_type} task.",
+                    agent_type=analysis.task_type,
+                    success=not analysis.blocked,
+                    data={"analysis": analysis.model_dump()},
+                )
+            ]
+
+            approval_state = {
+                "status": "not_required",
+                "reason": "",
+                "affected_steps": [],
             }
+            clarification_state = {
+                "status": "not_required",
+                "reason": "",
+                "options": [],
+            }
+
+            if analysis.blocked:
+                state['success'] = False
+                state['final_output'] = analysis.blocked_reason
+            else:
+                state, execution_events, approval_state, clarification_state = await self._execute_plan(
+                    state,
+                    plan,
+                    message_callback=message_callback,
+                )
+                execution_trace.extend(execution_events)
+
+                web_sensitive = state.get('metadata', {}).get('web_sensitive_blocked')
+                if web_sensitive and approval_state.get("status") != "required":
+                    approval_state = {
+                        "status": "required",
+                        "reason": state['metadata'].get(
+                            'approval_reason',
+                            "The browser encountered a sensitive page and needs your approval to continue.",
+                        ),
+                        "affected_steps": [s.step_id for s in plan.steps if s.agent_type == "web_autonomous"],
+                        "safety_level": "confirm",
+                        "resume_context": {
+                            "original_message": user_message,
+                            "task_type": "web_autonomous",
+                            "live_browser": True,
+                        },
+                    }
+
+                if approval_state["status"] == "required":
+                    from app.services.approval_service import approval_service
+
+                    approval_request = approval_service.create_request(
+                        user_id=envelope.user_id,
+                        conversation_id=envelope.conversation_id,
+                        user_message=user_message,
+                        reason=approval_state["reason"],
+                        channel=envelope.channel,
+                        affected_steps=approval_state.get("affected_steps", []),
+                        task_type=analysis.task_type,
+                        metadata={
+                            "safety_level": approval_state.get("safety_level"),
+                            "workflow_name": approval_state.get("workflow_name"),
+                            "resume_context": approval_state.get("resume_context") or resume_context or {},
+                        },
+                    )
+                    approval_state["approval_id"] = approval_request.approval_id
+                    state['success'] = False
+                    state['final_output'] = (
+                        "Approval is required before I continue.\n\n"
+                        f"Reason: {approval_state['reason']}"
+                    )
+                elif clarification_state["status"] == "required":
+                    from app.services.clarification_service import clarification_service
+
+                    clarification_request = clarification_service.create_request(
+                        user_id=envelope.user_id,
+                        conversation_id=envelope.conversation_id,
+                        user_message=user_message,
+                        question=clarification_state.get("question") or clarification_state.get("reason", "Clarification required."),
+                        options=clarification_state.get("options", []),
+                        channel=envelope.channel,
+                        task_type=analysis.task_type,
+                        metadata={
+                            "resume_context": clarification_state.get("resume_context") or {},
+                        },
+                    )
+                    clarification_state["clarification_id"] = clarification_request.clarification_id
+                    state['success'] = False
+                    state['final_output'] = self._format_clarification_prompt(clarification_state)
+                else:
+                    state['final_output'] = state.get('final_output') or state.get('current_output', '')
+
+            artifacts = self._extract_artifacts(state)
+            safe_metadata = {
+                key: value
+                for key, value in state.get('metadata', {}).items()
+                if not callable(value) and not key.startswith('_')
+            }
+
             response = {
-                'success': result.get('success', False),
-                'output': result.get('final_output', ''),
-                'task_type': result.get('task_type'),
-                'confidence': result.get('confidence'),
-                'agent_path': result.get('agent_path', []),
-                'code': result.get('code'),
-                'files': result.get('files'),
-                'language': result.get('language'),
-                'file_path': extra_metadata.get('project_path', ''),
+                'success': state.get('success', False),
+                'output': state.get('final_output', ''),
+                'task_type': analysis.task_type,
+                'confidence': analysis.confidence,
+                'agent_path': state.get('agent_path', []),
+                'code': state.get('code'),
+                'files': state.get('files'),
+                'language': state.get('language'),
+                'file_path': artifacts.get('project_path', ''),
                 'project_structure': None,
                 'main_file': None,
-                'project_type': extra_metadata.get('project_type', ''),
-                'server_running': extra_metadata.get('server_running', False),
-                'server_url': extra_metadata.get('server_url', ''),
+                'project_type': artifacts.get('project_type', ''),
+                'server_running': artifacts.get('server_running', False),
+                'server_url': artifacts.get('server_url', ''),
                 'server_port': None,
+                'plan': plan.model_dump(),
+                'execution_trace': [event.model_dump() for event in execution_trace],
+                'approval_state': approval_state,
+                'clarification_state': clarification_state,
+                'artifacts': artifacts,
                 'metadata': {
-                    'routing_reason': result.get('routing_reason'),
-                    'iterations': result.get('iteration', 1),
-                    'errors': result.get('errors', []),
-                    'web_screenshots': result.get('web_screenshots', []),
-                    'web_actions_count': len(result.get('web_actions', [])),
-                    'web_current_url': result.get('web_current_url', ''),
-                    **extra_metadata
-                }
+                    'channel': envelope.channel,
+                    'routing_reason': analysis.reasoning,
+                    'risk_level': analysis.risk_level,
+                    'iterations': len([event for event in execution_trace if event.event_type == 'step_completed']),
+                    'errors': state.get('errors', []),
+                    'web_screenshots': state.get('web_screenshots', []),
+                    'web_actions_count': len(state.get('web_actions', [])),
+                    'web_current_url': state.get('web_current_url', ''),
+                    **safe_metadata,
+                },
             }
-            
-            step_count = len(result.get('agent_path', []))
-            logger.info(f"✅ Completed with {step_count} steps")
-            
+
+            await self._persist_interaction(
+                envelope=envelope,
+                response_text=response['output'],
+                task_type=analysis.task_type,
+                agent_path=response['agent_path'],
+                success=response['success'],
+                execution_trace=execution_trace,
+                plan=plan,
+                artifacts=artifacts,
+                approval_state=approval_state,
+                clarification_state=clarification_state,
+            )
+            await self._emit_progress(
+                message_callback,
+                "final",
+                response['output'][:500] if response['output'] else "Execution complete.",
+                result=response,
+            )
+
+            logger.info(f"✅ Completed with {len(response['agent_path'])} agent hops")
             return response
-        
+
         except Exception as e:
             logger.error(f"❌ Graph execution error: {e}")
             return {
@@ -1513,7 +2677,12 @@ EXPLANATION: Brief description"""
                 'task_type': 'general',
                 'confidence': 0.0,
                 'agent_path': ['error'],
-                'metadata': {'error': str(e)}
+                'plan': None,
+                'execution_trace': [],
+                'approval_state': {'status': 'not_required', 'reason': '', 'affected_steps': []},
+                'clarification_state': {'status': 'not_required', 'reason': '', 'options': []},
+                'artifacts': {},
+                'metadata': {'error': str(e)},
             }
 
 
@@ -2041,3 +3210,5 @@ langgraph_orchestrator = LangGraphOrchestrator()
 
 # # Global instance
 # langgraph_orchestrator = LangGraphOrchestrator()
+
+

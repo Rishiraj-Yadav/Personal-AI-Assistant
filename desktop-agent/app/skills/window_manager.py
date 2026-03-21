@@ -27,6 +27,38 @@ class WindowManagerSkill:
                 self.win32gui = None
         
         logger.info(f"WindowManagerSkill initialized for {self.system}")
+
+    def _find_window_handle(self, title_query: str):
+        """Find a window handle by partial title match."""
+        if self.system != "Windows" or not self.win32gui:
+            return None, None
+
+        normalized_query = (title_query or "").lower().strip()
+        matches = []
+
+        def callback(hwnd, acc):
+            if not self.win32gui.IsWindowVisible(hwnd):
+                return
+            title = self.win32gui.GetWindowText(hwnd)
+            if not title:
+                return
+            if normalized_query and normalized_query not in title.lower():
+                return
+            rect = self.win32gui.GetWindowRect(hwnd)
+            acc.append(
+                {
+                    "hwnd": hwnd,
+                    "title": title,
+                    "rect": rect,
+                }
+            )
+
+        self.win32gui.EnumWindows(callback, matches)
+        if not matches:
+            return None, None
+        matches.sort(key=lambda item: len(item["title"]))
+        match = matches[0]
+        return match["hwnd"], match
     
     def execute(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -80,13 +112,20 @@ class WindowManagerSkill:
         windows = []
         
         if self.system == "Windows" and self.win32gui:
+            active_hwnd = self.win32gui.GetForegroundWindow()
             def callback(hwnd, windows_list):
                 if self.win32gui.IsWindowVisible(hwnd):
                     title = self.win32gui.GetWindowText(hwnd)
                     if title:
+                        left, top, right, bottom = self.win32gui.GetWindowRect(hwnd)
                         windows_list.append({
                             "id": hwnd,
-                            "title": title
+                            "title": title,
+                            "active": hwnd == active_hwnd,
+                            "left": left,
+                            "top": top,
+                            "width": max(0, right - left),
+                            "height": max(0, bottom - top),
                         })
             
             self.win32gui.EnumWindows(callback, windows)
@@ -167,29 +206,31 @@ class WindowManagerSkill:
             success = result.returncode == 0
         
         elif self.system == "Windows" and self.win32gui:
-            # Find window by title
-            hwnd = self.win32gui.FindWindow(None, title)
+            match = None
+            hwnd, match = self._find_window_handle(title)
             if hwnd:
                 self.win32gui.SetForegroundWindow(hwnd)
                 success = True
             else:
                 success = False
-        
+
         else:
             success = False
-        
+
         return {
             "success": success,
             "action": "focus",
-            "title": title
+            "title": title,
+            "matched_title": match["title"] if success and match else "",
         }
     
     def _minimize_window(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Minimize a window"""
         title = args.get("title", "")
+        match = None
         
         if self.system == "Windows" and self.win32gui:
-            hwnd = self.win32gui.FindWindow(None, title)
+            hwnd, match = self._find_window_handle(title)
             if hwnd:
                 self.win32gui.ShowWindow(hwnd, self.win32con.SW_MINIMIZE)
                 success = True
@@ -201,15 +242,17 @@ class WindowManagerSkill:
         return {
             "success": success,
             "action": "minimize",
-            "title": title
+            "title": title,
+            "matched_title": match["title"] if success and match else "",
         }
     
     def _maximize_window(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Maximize a window"""
         title = args.get("title", "")
+        match = None
         
         if self.system == "Windows" and self.win32gui:
-            hwnd = self.win32gui.FindWindow(None, title)
+            hwnd, match = self._find_window_handle(title)
             if hwnd:
                 self.win32gui.ShowWindow(hwnd, self.win32con.SW_MAXIMIZE)
                 success = True
@@ -221,15 +264,17 @@ class WindowManagerSkill:
         return {
             "success": success,
             "action": "maximize",
-            "title": title
+            "title": title,
+            "matched_title": match["title"] if success and match else "",
         }
     
     def _close_window(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Close a window"""
         title = args.get("title", "")
+        match = None
         
         if self.system == "Windows" and self.win32gui:
-            hwnd = self.win32gui.FindWindow(None, title)
+            hwnd, match = self._find_window_handle(title)
             if hwnd:
                 self.win32gui.PostMessage(hwnd, self.win32con.WM_CLOSE, 0, 0)
                 success = True
@@ -241,7 +286,8 @@ class WindowManagerSkill:
         return {
             "success": success,
             "action": "close",
-            "title": title
+            "title": title,
+            "matched_title": match["title"] if success and match else "",
         }
     
     def _get_active_window(self) -> Dict[str, Any]:
@@ -249,13 +295,24 @@ class WindowManagerSkill:
         if self.system == "Windows" and self.win32gui:
             hwnd = self.win32gui.GetForegroundWindow()
             title = self.win32gui.GetWindowText(hwnd)
+            left, top, right, bottom = self.win32gui.GetWindowRect(hwnd)
+            rect = {
+                "left": left,
+                "top": top,
+                "width": max(0, right - left),
+                "height": max(0, bottom - top),
+            }
         else:
+            hwnd = None
             title = "Unknown"
+            rect = {}
         
         return {
             "success": True,
             "action": "get_active",
-            "title": title
+            "title": title,
+            "id": hwnd,
+            "rect": rect,
         }
 
 

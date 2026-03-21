@@ -276,7 +276,7 @@ class WebAgentService:
     def __init__(self):
         self._sessions: Dict[str, WebAgentSession] = {}
         self._pending_permissions: Dict[str, Dict] = {}  # user_id -> pending action
-        self.max_steps = 15  # max autonomous steps per task
+        self.max_steps = 5  # keep autonomous browsing bounded and predictable
         logger.info("✅ Web Agent Service initialized")
 
     async def get_or_create_session(self, user_id: str) -> WebAgentSession:
