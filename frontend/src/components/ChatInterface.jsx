@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
 import axios from 'axios'
 import MessageList from './MessageList'
+import UserProfileForm from './UserProfileForm'
 import { getUserId, getUserName, setUserName, hasUserName } from '../utils/userId'
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1'
@@ -30,6 +31,8 @@ function ChatInterface() {
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [conversations, setConversations] = useState([])
   const [showProfile, setShowProfile] = useState(false)
+  const [showProfileForm, setShowProfileForm] = useState(false)
+  const [displayName, setDisplayName] = useState(getUserName() || 'User')
 
   const [conversationId, setConversationId] = useState(() => {
     return localStorage.getItem(CONVERSATION_ID_KEY) || null
@@ -121,7 +124,11 @@ function ChatInterface() {
   }
 
   const handleSetName = (name) => {
-    if (name.trim()) { setUserName(name.trim()); setShowNamePrompt(false) }
+    if (name.trim()) { setUserName(name.trim()); setDisplayName(name.trim()); setShowNamePrompt(false) }
+  }
+
+  const handleProfileSave = (name) => {
+    setDisplayName(name)
   }
 
   const sendMessage = async (e) => {
@@ -353,12 +360,17 @@ function ChatInterface() {
           {showProfile && sidebarOpen && (
             <div className="profile-dropdown">
               <div className="profile-dropdown-header">
-                <div className="avatar lg">{(getUserName() || 'U')[0].toUpperCase()}</div>
+                <div className="avatar lg">{(displayName || 'U')[0].toUpperCase()}</div>
                 <div>
-                  <div className="profile-name">{getUserName() || 'User'}</div>
+                  <div className="profile-name">{displayName || 'User'}</div>
                   <div className="profile-id">{userId.substring(0, 16)}...</div>
                 </div>
               </div>
+              <div className="profile-dropdown-divider" />
+              <button className="profile-dropdown-item" onClick={() => { setShowProfile(false); setShowProfileForm(true) }}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                Edit Profile
+              </button>
               <div className="profile-dropdown-divider" />
               {googleConnected ? (
                 <button className="profile-dropdown-item" onClick={disconnectGoogle}>
@@ -377,10 +389,10 @@ function ChatInterface() {
             </div>
           )}
           <button className="profile-trigger" onClick={() => setShowProfile(!showProfile)}>
-            <div className="avatar">{(getUserName() || 'U')[0].toUpperCase()}</div>
+            <div className="avatar">{(displayName || 'U')[0].toUpperCase()}</div>
             {sidebarOpen && (
               <div className="profile-info">
-                <span className="profile-name">{getUserName() || 'User'}</span>
+                <span className="profile-name">{displayName || 'User'}</span>
                 <span className="profile-status">{googleConnected ? 'Google connected' : 'Free tier'}</span>
               </div>
             )}
@@ -475,6 +487,13 @@ function ChatInterface() {
           <div className="input-hint">SonarBot can make mistakes. Type <kbd>/</kbd> for commands.</div>
         </div>
       </main>
+
+      {showProfileForm && (
+        <UserProfileForm
+          onClose={() => setShowProfileForm(false)}
+          onSave={handleProfileSave}
+        />
+      )}
     </div>
   )
 }
